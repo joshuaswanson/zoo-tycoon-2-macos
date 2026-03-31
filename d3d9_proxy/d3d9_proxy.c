@@ -594,6 +594,28 @@ static HRESULT WINAPI Hooked_Present(IDirect3DDevice9 *dev, const RECT *src, con
     return g_origDevVtbl->Present(dev, src, dst, hwOver, rgn);
 }
 
+/* Clamp SetViewport to backbuffer size to prevent zoom when window is larger */
+static HRESULT WINAPI Hooked_SetViewport(IDirect3DDevice9 *dev, const D3DVIEWPORT9 *vp) {
+    if (vp && g_bbWidth > 0 && g_bbHeight > 0) {
+        D3DVIEWPORT9 clamped = *vp;
+        if (clamped.Width > g_bbWidth) clamped.Width = g_bbWidth;
+        if (clamped.Height > g_bbHeight) clamped.Height = g_bbHeight;
+        return g_origDevVtbl->SetViewport(dev, &clamped);
+    }
+    return g_origDevVtbl->SetViewport(dev, vp);
+}
+
+/* Clamp SetScissorRect to backbuffer size */
+static HRESULT WINAPI Hooked_SetScissorRect(IDirect3DDevice9 *dev, const RECT *r) {
+    if (r && g_bbWidth > 0 && g_bbHeight > 0) {
+        RECT clamped = *r;
+        if (clamped.right > (LONG)g_bbWidth) clamped.right = g_bbWidth;
+        if (clamped.bottom > (LONG)g_bbHeight) clamped.bottom = g_bbHeight;
+        return g_origDevVtbl->SetScissorRect(dev, &clamped);
+    }
+    return g_origDevVtbl->SetScissorRect(dev, r);
+}
+
 static HRESULT WINAPI Hooked_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *pp) {
     if (pp) {
         pp->Windowed = TRUE;
@@ -640,11 +662,14 @@ static HRESULT WINAPI W_CreateDevice(IDirect3D9 *s, UINT a, D3DDEVTYPE dt, HWND 
             }
         }
     }
-    /* Force windowed mode */
+    /* Force windowed mode at a good resolution */
     if (pp && !pp->Windowed) {
         pp->Windowed = TRUE;
         pp->FullScreen_RefreshRateInHz = 0;
         pp->BackBufferFormat = D3DFMT_UNKNOWN;
+        /* Render at 1024x768 (4:3, crisp on most displays) */
+        
+        
         DebugLog("  Forced windowed mode");
     }
     /* Fix depth format: D32(71) → D24S8(75) */
@@ -703,6 +728,8 @@ static HRESULT WINAPI W_CreateDevice(IDirect3D9 *s, UINT a, D3DDEVTYPE dt, HWND 
             memcpy(&g_hookedDevVtbl, g_origDevVtbl, sizeof(g_hookedDevVtbl));
             g_hookedDevVtbl.Present = Hooked_Present;
             g_hookedDevVtbl.Reset = Hooked_Reset;
+            g_hookedDevVtbl.SetViewport = Hooked_SetViewport;
+            g_hookedDevVtbl.SetScissorRect = Hooked_SetScissorRect;
             *(void**)device = &g_hookedDevVtbl;
             /* Subclass window for smooth 4:3 aspect ratio locking */
             if (hw) {
