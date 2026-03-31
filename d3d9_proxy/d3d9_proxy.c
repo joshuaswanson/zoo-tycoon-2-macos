@@ -522,52 +522,95 @@ static IDirect3DDevice9* WrapDevice9(IDirect3DDevice9 *real) {
     return (IDirect3DDevice9*)wd;
 }
 
-/* Present() hook for window resize scaling */
+/* Device vtable hooks for window resize scaling */
 static IDirect3DDevice9Vtbl *g_origDevVtbl = NULL;
 static IDirect3DDevice9Vtbl g_hookedDevVtbl;
+static IDirect3DDevice9 *g_device = NULL;
+static HWND g_deviceHwnd = NULL;
+static UINT g_bbWidth = 0, g_bbHeight = 0;
+static WNDPROC g_origWndProc = NULL;
 
-static HRESULT WINAPI Hooked_Present(IDirect3DDevice9 *dev, const RECT *src, const RECT *dst, HWND hwOver, const RGNDATA *rgn) {
-    /* Scale backbuffer to window while maintaining 4:3 aspect ratio.
-       Uses letterboxing (black bars) if the window isn't 4:3. */
-    HWND hw;
-    RECT clientRect;
-    D3DDEVICE_CREATION_PARAMETERS cp;
-
-    if (SUCCEEDED(dev->lpVtbl->GetCreationParameters(dev, &cp))) {
-        hw = cp.hFocusWindow;
-    } else {
-        return g_origDevVtbl->Present(dev, NULL, NULL, hwOver, rgn);
+/* Window proc subclass to lock 4:3 aspect ratio during resize */
+static LRESULT CALLBACK AspectWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_SIZING && lp) {
+        RECT *r = (RECT*)lp;
+        LONG w = r->right - r->left;
+        LONG h = r->bottom - r->top;
+        /* Get border sizes */
+        LONG style = GetWindowLongA(hwnd, GWL_STYLE);
+        RECT borders = {0, 0, 0, 0};
+        AdjustWindowRect(&borders, style, FALSE);
+        LONG bw = (borders.right - borders.left);
+        LONG bh = (borders.bottom - borders.top);
+        LONG clientW = w - bw;
+        LONG clientH = h - bh;
+        /* Enforce 4:3 based on which edge is being dragged */
+        LONG newClientH = (clientW * 3) / 4;
+        LONG newH = newClientH + bh;
+        /* Adjust bottom edge to match */
+        if (wp == WMSZ_LEFT || wp == WMSZ_RIGHT || wp == WMSZ_TOPLEFT || wp == WMSZ_TOPRIGHT ||
+            wp == WMSZ_BOTTOMLEFT || wp == WMSZ_BOTTOMRIGHT) {
+            if (wp == WMSZ_TOPLEFT || wp == WMSZ_TOPRIGHT)
+                r->top = r->bottom - newH;
+            else
+                r->bottom = r->top + newH;
+        } else {
+            /* Dragging top or bottom edge: compute width from height */
+            LONG newClientW = (clientH * 4) / 3;
+            LONG newW = newClientW + bw;
+            r->right = r->left + newW;
+        }
+        return TRUE;
     }
-
-    if (GetClientRect(hw, &clientRect)) {
-        LONG cw = clientRect.right - clientRect.left;
-        LONG ch = clientRect.bottom - clientRect.top;
-        if (cw > 0 && ch > 0) {
-            RECT destRect;
-            float windowRatio = (float)cw / (float)ch;
-            float gameRatio = 4.0f / 3.0f;
-
-            if (windowRatio > gameRatio) {
-                /* Window is wider than 4:3, pillarbox (black bars on sides) */
-                LONG scaledW = (LONG)(ch * gameRatio);
-                LONG offset = (cw - scaledW) / 2;
-                destRect.left = offset;
-                destRect.top = 0;
-                destRect.right = offset + scaledW;
-                destRect.bottom = ch;
-            } else {
-                /* Window is taller than 4:3, letterbox (black bars top/bottom) */
-                LONG scaledH = (LONG)(cw / gameRatio);
-                LONG offset = (ch - scaledH) / 2;
-                destRect.left = 0;
-                destRect.top = offset;
-                destRect.right = cw;
-                destRect.bottom = offset + scaledH;
+    if (msg == WM_SIZE && g_device) {
+        UINT newW = LOWORD(lp);
+        UINT newH = HIWORD(lp);
+        if (newW > 0 && newH > 0 && (newW != g_bbWidth || newH != g_bbHeight)) {
+            /* Try to Reset the device to the new size */
+            D3DPRESENT_PARAMETERS pp;
+            memset(&pp, 0, sizeof(pp));
+            pp.BackBufferWidth = newW;
+            pp.BackBufferHeight = newH;
+            pp.BackBufferFormat = D3DFMT_UNKNOWN;
+            pp.BackBufferCount = 1;
+            pp.SwapEffect = 1; /* D3DSWAPEFFECT_DISCARD */
+            pp.Windowed = TRUE;
+            pp.EnableAutoDepthStencil = TRUE;
+            pp.AutoDepthStencilFormat = 75; /* D3DFMT_D24S8 */
+            pp.PresentationInterval = 1;
+            {
+                HRESULT hr = g_origDevVtbl->Reset(g_device, &pp);
+                if (SUCCEEDED(hr)) {
+                    g_bbWidth = newW;
+                    g_bbHeight = newH;
+                }
             }
-            return g_origDevVtbl->Present(dev, NULL, &destRect, hwOver, rgn);
         }
     }
-    return g_origDevVtbl->Present(dev, NULL, NULL, hwOver, rgn);
+    return CallWindowProcA(g_origWndProc, hwnd, msg, wp, lp);
+}
+
+static HRESULT WINAPI Hooked_Present(IDirect3DDevice9 *dev, const RECT *src, const RECT *dst, HWND hwOver, const RGNDATA *rgn) {
+    return g_origDevVtbl->Present(dev, src, dst, hwOver, rgn);
+}
+
+static HRESULT WINAPI Hooked_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *pp) {
+    if (pp) {
+        pp->Windowed = TRUE;
+        pp->BackBufferFormat = D3DFMT_UNKNOWN;
+        pp->FullScreen_RefreshRateInHz = 0;
+        if (pp->EnableAutoDepthStencil && pp->AutoDepthStencilFormat == 71)
+            pp->AutoDepthStencilFormat = 75;
+    }
+    {
+        HRESULT hr = g_origDevVtbl->Reset(dev, pp);
+        if (SUCCEEDED(hr) && pp) {
+            g_bbWidth = pp->BackBufferWidth;
+            g_bbHeight = pp->BackBufferHeight;
+            { char buf[64]; wsprintfA(buf, "Reset OK: %ux%u", g_bbWidth, g_bbHeight); DebugLog(buf); }
+        }
+        return hr;
+    }
 }
 
 static HRESULT WINAPI W_CreateDevice(IDirect3D9 *s, UINT a, D3DDEVTYPE dt, HWND hw, DWORD fl, D3DPRESENT_PARAMETERS *pp, IDirect3DDevice9 **dev) {
@@ -648,17 +691,24 @@ static HRESULT WINAPI W_CreateDevice(IDirect3D9 *s, UINT a, D3DDEVTYPE dt, HWND 
         }
         ShowWindow(hw, SW_SHOW);
 
-        /* Hook the device's Present() to scale backbuffer to window size on resize.
-           We redirect the vtable pointer to a copy with our Present override.
-           All other methods still use the real vtable with correct 'this'. */
+        /* Hook device + window for resize support */
         if (dev && *dev) {
             IDirect3DDevice9 *device = *dev;
+            g_device = device;
             g_origDevVtbl = (IDirect3DDevice9Vtbl*)device->lpVtbl;
+            g_deviceHwnd = hw;
+            g_bbWidth = pp->BackBufferWidth;
+            g_bbHeight = pp->BackBufferHeight;
+            /* Hook vtable */
             memcpy(&g_hookedDevVtbl, g_origDevVtbl, sizeof(g_hookedDevVtbl));
             g_hookedDevVtbl.Present = Hooked_Present;
-            /* Swap the vtable pointer */
+            g_hookedDevVtbl.Reset = Hooked_Reset;
             *(void**)device = &g_hookedDevVtbl;
-            DebugLog("  Hooked Present() for window resize scaling");
+            /* Subclass window for smooth 4:3 aspect ratio locking */
+            if (hw) {
+                g_origWndProc = (WNDPROC)SetWindowLongA(hw, GWL_WNDPROC, (LONG)AspectWndProc);
+                DebugLog("  Subclassed window for 4:3 aspect lock + resize");
+            }
         }
     }
 
