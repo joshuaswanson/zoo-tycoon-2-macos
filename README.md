@@ -1,8 +1,8 @@
 # Zoo Tycoon 2 Ultimate Collection on macOS (Apple Silicon)
 
-Zoo Tycoon 2 Ultimate Collection (2004) is a 32-bit Windows DirectX 9 game. It does not run on macOS out of the box, and Wine alone can't handle it either -the game has a GPU vendor whitelist, SafeDisc copy protection, and a startup validation routine that rejects anything that isn't a real NVIDIA or ATI card from 2004.
+Zoo Tycoon 2 Ultimate Collection (2004) is a Windows-only DirectX 9 game. It doesn't run on macOS out of the box. Even [Wine](https://www.winehq.org/) (a compatibility layer that runs Windows software on other operating systems) can't handle it on its own, because the game checks for specific NVIDIA/ATI graphics cards from 2004 and refuses to start if it doesn't find one.
 
-This repo contains a custom `d3d9.dll` proxy and a set of runtime binary patches that fix all of that. The game runs in a normal macOS window through Wine's OpenGL backend.
+This repo contains a custom proxy DLL and runtime binary patches that trick the game into running. It plays in a normal macOS window through Wine's OpenGL backend.
 
 ## What the proxy does
 
@@ -19,12 +19,12 @@ The proxy DLL (`d3d9.dll`) loads between the game and Wine's real D3D9 implement
   - Renderer creation gate at 005BBCD1: forced to pass
 - Patches wined3d.dll's framebuffer completeness checks (macOS OpenGL returns GL_INVALID_FRAMEBUFFER_OPERATION on certain FBO configurations that work fine on Linux)
 
-There's also `click_continue.exe`, a small Win32 app that runs alongside the game and automatically clicks through the EULA, the "old driver" warning dialog, and the "unable to create renderer" error dialog. The error dialog's Continue button is normally grayed out -the tool force-enables it and clicks Safe Mode.
+There's also `click_continue.exe`, a small Win32 app that runs alongside the game and automatically clicks through the EULA, the "old driver" warning dialog, and the "unable to create renderer" error dialog. The error dialog's Continue button is normally grayed out, so the tool force-enables it and clicks Safe Mode.
 
 ## Requirements
 
 - macOS on Apple Silicon (tested on Tahoe 26.4, M1 Max)
-- Wine Crossover (free -`brew install --cask wine-crossover` or equivalent)
+- [Wine Crossover](https://github.com/nicehash/wine) (a free compatibility layer that lets you run Windows apps on macOS)
 - mingw cross-compiler for building (`brew install mingw-w64`)
 - Your own copy of Zoo Tycoon 2 Ultimate Collection
 
@@ -64,7 +64,7 @@ cd ..
 
 ```
 ZT.exe
- -> d3d9.dll (this proxy -spoofs GPU, injects modes, patches binary)
+ -> d3d9.dll (proxy: GPU spoof, mode injection, binary patches)
    -> d3d9_real.dll (Wine's builtin d3d9)
      -> wined3d.dll (D3D9-to-OpenGL translation)
        -> macOS OpenGL
@@ -82,11 +82,10 @@ macOS adds its own problems: no 640x480 fullscreen mode on Retina displays, depr
 
 ## Files
 
-- `d3d9_proxy/d3d9_proxy.c` -the proxy DLL (GPU spoof, mode injection, binary patches, FBO fixes)
-- `d3d9_proxy/cds_hook.c` -ChangeDisplaySettings IAT hook
-- `d3d9_proxy/click_continue.c` -dialog auto-clicker
-- `d3d9_proxy/list_windows.c` -Wine window enumerator (debug tool)
-- `play_zoo_tycoon.sh` -launch script
+- `d3d9_proxy/d3d9_proxy.c` - the proxy DLL (GPU spoof, mode injection, binary patches, FBO fixes)
+- `d3d9_proxy/cds_hook.c` - ChangeDisplaySettings IAT hook
+- `d3d9_proxy/click_continue.c` - dialog auto-clicker
+- `play_zoo_tycoon.sh` - launch script
 
 ## License
 

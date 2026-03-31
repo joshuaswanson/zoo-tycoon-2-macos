@@ -522,6 +522,54 @@ static IDirect3DDevice9* WrapDevice9(IDirect3DDevice9 *real) {
     return (IDirect3DDevice9*)wd;
 }
 
+/* Present() hook for window resize scaling */
+static IDirect3DDevice9Vtbl *g_origDevVtbl = NULL;
+static IDirect3DDevice9Vtbl g_hookedDevVtbl;
+
+static HRESULT WINAPI Hooked_Present(IDirect3DDevice9 *dev, const RECT *src, const RECT *dst, HWND hwOver, const RGNDATA *rgn) {
+    /* Scale backbuffer to window while maintaining 4:3 aspect ratio.
+       Uses letterboxing (black bars) if the window isn't 4:3. */
+    HWND hw;
+    RECT clientRect;
+    D3DDEVICE_CREATION_PARAMETERS cp;
+
+    if (SUCCEEDED(dev->lpVtbl->GetCreationParameters(dev, &cp))) {
+        hw = cp.hFocusWindow;
+    } else {
+        return g_origDevVtbl->Present(dev, NULL, NULL, hwOver, rgn);
+    }
+
+    if (GetClientRect(hw, &clientRect)) {
+        LONG cw = clientRect.right - clientRect.left;
+        LONG ch = clientRect.bottom - clientRect.top;
+        if (cw > 0 && ch > 0) {
+            RECT destRect;
+            float windowRatio = (float)cw / (float)ch;
+            float gameRatio = 4.0f / 3.0f;
+
+            if (windowRatio > gameRatio) {
+                /* Window is wider than 4:3, pillarbox (black bars on sides) */
+                LONG scaledW = (LONG)(ch * gameRatio);
+                LONG offset = (cw - scaledW) / 2;
+                destRect.left = offset;
+                destRect.top = 0;
+                destRect.right = offset + scaledW;
+                destRect.bottom = ch;
+            } else {
+                /* Window is taller than 4:3, letterbox (black bars top/bottom) */
+                LONG scaledH = (LONG)(cw / gameRatio);
+                LONG offset = (ch - scaledH) / 2;
+                destRect.left = 0;
+                destRect.top = offset;
+                destRect.right = cw;
+                destRect.bottom = offset + scaledH;
+            }
+            return g_origDevVtbl->Present(dev, NULL, &destRect, hwOver, rgn);
+        }
+    }
+    return g_origDevVtbl->Present(dev, NULL, NULL, hwOver, rgn);
+}
+
 static HRESULT WINAPI W_CreateDevice(IDirect3D9 *s, UINT a, D3DDEVTYPE dt, HWND hw, DWORD fl, D3DPRESENT_PARAMETERS *pp, IDirect3DDevice9 **dev) {
     HRESULT hr;
     char buf[256];
@@ -549,18 +597,12 @@ static HRESULT WINAPI W_CreateDevice(IDirect3D9 *s, UINT a, D3DDEVTYPE dt, HWND 
             }
         }
     }
-    /* ALWAYS force windowed mode - fullscreen on macOS causes:
-       1. Mouse coordinate scaling issues (Retina mismatch)
-       2. Can't escape the app (no Cmd+Tab)
-       3. Display mode change failures */
+    /* Force windowed mode */
     if (pp && !pp->Windowed) {
-        DebugLog("  FORCING WINDOWED MODE (game requested fullscreen)");
         pp->Windowed = TRUE;
         pp->FullScreen_RefreshRateInHz = 0;
         pp->BackBufferFormat = D3DFMT_UNKNOWN;
-        /* Keep the game's requested resolution for the backbuffer */
-        wsprintfA(buf, "  Windowed %ux%u", pp->BackBufferWidth, pp->BackBufferHeight);
-        DebugLog(buf);
+        DebugLog("  Forced windowed mode");
     }
     /* Fix depth format: D32(71) → D24S8(75) */
     if (pp && pp->EnableAutoDepthStencil && pp->AutoDepthStencilFormat == 71) {
@@ -591,13 +633,12 @@ static HRESULT WINAPI W_CreateDevice(IDirect3D9 *s, UINT a, D3DDEVTYPE dt, HWND 
         }
     }
 
-    if (SUCCEEDED(hr) && pp && hw) {
-        /* Add title bar and standard window controls */
+    if (SUCCEEDED(hr) && pp && pp->Windowed && hw) {
+        /* Add title bar, window controls, and RESIZABLE border */
         LONG style = GetWindowLongA(hw, GWL_STYLE);
         style |= WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
-        style &= ~WS_POPUP; /* Remove popup style */
+        style &= ~WS_POPUP;
         SetWindowLongA(hw, GWL_STYLE, style);
-        /* Resize to account for title bar and borders */
         {
             RECT rc = {0, 0, (LONG)pp->BackBufferWidth, (LONG)pp->BackBufferHeight};
             AdjustWindowRect(&rc, style, FALSE);
@@ -606,7 +647,19 @@ static HRESULT WINAPI W_CreateDevice(IDirect3D9 *s, UINT a, D3DDEVTYPE dt, HWND 
                 SWP_SHOWWINDOW | SWP_FRAMECHANGED);
         }
         ShowWindow(hw, SW_SHOW);
-        DebugLog("  Added title bar + window controls");
+
+        /* Hook the device's Present() to scale backbuffer to window size on resize.
+           We redirect the vtable pointer to a copy with our Present override.
+           All other methods still use the real vtable with correct 'this'. */
+        if (dev && *dev) {
+            IDirect3DDevice9 *device = *dev;
+            g_origDevVtbl = (IDirect3DDevice9Vtbl*)device->lpVtbl;
+            memcpy(&g_hookedDevVtbl, g_origDevVtbl, sizeof(g_hookedDevVtbl));
+            g_hookedDevVtbl.Present = Hooked_Present;
+            /* Swap the vtable pointer */
+            *(void**)device = &g_hookedDevVtbl;
+            DebugLog("  Hooked Present() for window resize scaling");
+        }
     }
 
     /* Device wrapper disabled - vtable copy breaks non-overridden methods.

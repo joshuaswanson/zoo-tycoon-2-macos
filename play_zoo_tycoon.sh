@@ -1,6 +1,6 @@
 #!/bin/bash
 # Zoo Tycoon 2 Ultimate Collection - macOS Launcher
-# Runs via Wine with D3D9 proxy (GPU spoof + mode injection + OpenGL renderer)
+# To quit: Cmd+Option+Esc -> Force Quit "wine-preloader"
 
 cd "$(dirname "$0")/Game Files"
 
