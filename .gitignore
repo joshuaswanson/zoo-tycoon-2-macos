@@ -1,0 +1,50 @@
+# Game files (copyrighted - do NOT commit)
+Game Files/*.exe
+Game Files/*.dll
+Game Files/*.dat
+Game Files/*.bmp
+Game Files/*.ico
+Game Files/*.ini
+Game Files/*.txt
+Game Files/*.log
+Game Files/*.cfg
+Game Files/*.z2f
+Game Files/xpack*
+Game Files/lang*
+Game Files/Awards/
+Game Files/effects/
+Game Files/fonts/
+Game Files/maps/
+Game Files/photos/
+Game Files/profiles/
+Game Files/scenario/
+Game Files/shared/
+Game Files/sounds/
+Game Files/tourney/
+Game Files/ui/
+Game Files/updates/
+Game Files/x10/
+Game Files/x20/
+Game Files/x30/
+
+# Keep our custom tools in Game Files
+!Game Files/click_continue.exe
+!Game Files/list_windows.exe
+!Game Files/d3d9.dll
+!Game Files/d3d9_real.dll
+
+# Actually don't commit ANY binaries - they can be rebuilt
+Game Files/
+
+# Compiled binaries (rebuild from source)
+d3d9_proxy/*.dll
+d3d9_proxy/*.exe
+d3d9_proxy/*.o
+d3d9_proxy/vidcheck_*.txt
+
+# Wine prefix
+.wine/
+
+# macOS
+.DS_Store
+*.swp
