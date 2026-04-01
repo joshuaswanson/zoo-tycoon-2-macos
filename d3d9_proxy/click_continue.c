@@ -11,7 +11,7 @@
 static const char *titles[] = {
     "Zoo Tycoon 2 Ultimate Collection End User License Agreement",
     "Zoo Tycoon 2 Warning",
-    "Zoo Tycoon 2 Error",
+    
     "Zoo Tycoon 2",
     NULL
 };

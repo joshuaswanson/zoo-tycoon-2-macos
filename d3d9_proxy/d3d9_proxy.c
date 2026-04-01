@@ -977,6 +977,125 @@ __declspec(dllexport) IDirect3D9* WINAPI Direct3DCreate9(UINT SDKVersion) {
                 /* 005BBE90: JE for bit-flag check - NOT patched (it jumps past renderer creation) */
                 DebugLog("Skipping JE at 005BBE90 (would skip renderer creation)");
 
+            /* Patch 4: JNZ at 005BBD38 -> NOP (prevent jump to error handler)
+               NOTE: This code path may have already executed before Direct3DCreate9.
+               Only apply if the bytes match (they won't if already patched/executed). */
+            {
+                BYTE *jnz = base + (0x005BBD38 - 0x400000);
+                if (jnz[0] == 0x0F && jnz[1] == 0x85) {
+                    DWORD oldProt;
+                    DebugLog("PATCH: JNZ at 005BBD38 -> NOP (skip error jump)");
+                    VirtualProtect(jnz, 6, PAGE_EXECUTE_READWRITE, &oldProt);
+                    jnz[0]=0x90; jnz[1]=0x90; jnz[2]=0x90;
+                    jnz[3]=0x90; jnz[4]=0x90; jnz[5]=0x90;
+                    VirtualProtect(jnz, 6, oldProt, &oldProt);
+                }
+            }
+
+            /* Patch 5: Error string scanner - find PUSH instructions referencing
+               error strings and patch their guard Jcc instructions */
+            {
+                BYTE *imgBase = base;
+                DWORD imageSize = nt->OptionalHeader.SizeOfImage;
+                const char *needles[] = {
+                    "error:d3d_create_failed",
+                    "error:unsupported_graphics_adapter",
+                    "error:prototype_graphics_adapter",
+                    "error:invalid_graphics_driver",
+                    "error:old_graphics_driver",
+                    "error:init_video_card_info_failed",
+                    "error:enumerate_adapter_modes_failed",
+                    "error:slow_processor",
+                    NULL
+                };
+                /* NOTE: "error:low_video_memory" and "error:low_system_memory" are NOT
+                   included here because their code paths execute BEFORE Direct3DCreate9.
+                   Patching them after-the-fact corrupts the game's init flow.
+                   These are handled by the dialog auto-dismiss thread instead. */
+                int ni;
+                for (ni = 0; needles[ni]; ni++) {
+                    const char *needle = needles[ni];
+                    DWORD needleLen = strlen(needle);
+                    DWORD offset;
+                    BYTE *errorStr = NULL;
+
+                    for (offset = 0; offset < imageSize - needleLen; offset++) {
+                        if (memcmp(imgBase + offset, needle, needleLen) == 0) {
+                            errorStr = imgBase + offset;
+                            break;
+                        }
+                    }
+                    if (!errorStr) continue;
+
+                    {
+                        char nb[256];
+                        wsprintfA(nb, "Found '%s' at %p", needle, errorStr);
+                        DebugLog(nb);
+                    }
+
+                    /* Search code sections for PUSH references to this string */
+                    {
+                        DWORD targetAddr = (DWORD)(DWORD_PTR)errorStr;
+                        BYTE targetBytes[4];
+                        DWORD si;
+                        memcpy(targetBytes, &targetAddr, 4);
+
+                        for (si = 0; si < nt->FileHeader.NumberOfSections; si++) {
+                            BYTE *secBase = base + sections[si].VirtualAddress;
+                            DWORD secSize = sections[si].Misc.VirtualSize;
+                            DWORD j;
+
+                            for (j = 0; j < secSize - 4; j++) {
+                                if (memcmp(secBase + j, targetBytes, 4) == 0 &&
+                                    j > 0 && secBase[j-1] == 0x68) {
+                                    /* Found push <error_string> - look backwards for Jcc */
+                                    DWORD k;
+                                    char nb2[256];
+                                    wsprintfA(nb2, "  PUSH ref at %p", secBase + j - 1);
+                                    DebugLog(nb2);
+
+                                    for (k = j - 2; k > j - 64 && k > 0; k--) {
+                                        BYTE op = secBase[k];
+                                        if (op >= 0x70 && op <= 0x7F && op != 0xEB) {
+                                            signed char rel = (signed char)secBase[k+1];
+                                            DWORD jumpTarget = k + 2 + rel;
+                                            if (jumpTarget > j) {
+                                                DWORD oldProt;
+                                                wsprintfA(nb2, "  Patched Jcc 0x%02X at %p -> JMP (skips error push)",
+                                                    op, secBase + k);
+                                                DebugLog(nb2);
+                                                VirtualProtect(secBase + k, 1, PAGE_EXECUTE_READWRITE, &oldProt);
+                                                secBase[k] = 0xEB;
+                                                VirtualProtect(secBase + k, 1, oldProt, &oldProt);
+                                            }
+                                            break;
+                                        }
+                                        if (op == 0x0F && k + 1 < secSize &&
+                                            (secBase[k+1] == 0x84 || secBase[k+1] == 0x85)) {
+                                            LONG rel32;
+                                            DWORD jumpTarget;
+                                            memcpy(&rel32, secBase + k + 2, 4);
+                                            jumpTarget = k + 6 + rel32;
+                                            if (jumpTarget > j) {
+                                                DWORD oldProt;
+                                                wsprintfA(nb2, "  Patched long Jcc at %p -> JMP rel32", secBase + k);
+                                                DebugLog(nb2);
+                                                VirtualProtect(secBase + k, 6, PAGE_EXECUTE_READWRITE, &oldProt);
+                                                secBase[k] = 0x90;
+                                                secBase[k+1] = 0xE9;
+                                                VirtualProtect(secBase + k, 6, oldProt, &oldProt);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                DebugLog("Error string scanner complete");
+            }
+
                 /* Factory range scan DISABLED - breaks control flow */
 #if 0
                 {
@@ -1491,6 +1610,441 @@ __declspec(dllexport) void* WINAPI Direct3DShaderValidatorCreate9(void) {
 }
 
 
+/* === GetProcAddress Hook - Intercept DirectDraw VRAM queries === */
+
+#include <ddraw.h>
+
+typedef FARPROC (WINAPI *PFN_GetProcAddress)(HMODULE, LPCSTR);
+static PFN_GetProcAddress real_GetProcAddress = NULL;
+
+/* Wrapped IDirectDraw7 that spoofs GetAvailableVidMem */
+typedef struct {
+    IDirectDraw7Vtbl *lpVtbl;
+    IDirectDraw7 *real;
+    IDirectDraw7Vtbl hooked_vtbl;
+    LONG refcount;
+} VRAMWrappedDD7;
+
+#define VWDD(p) ((VRAMWrappedDD7*)(p))
+
+static HRESULT WINAPI VW_QueryInterface(IDirectDraw7 *s, REFIID riid, void **out) {
+    HRESULT hr = IDirectDraw7_QueryInterface(VWDD(s)->real, riid, out);
+    if (SUCCEEDED(hr)) *out = s;
+    return hr;
+}
+static ULONG WINAPI VW_AddRef(IDirectDraw7 *s) { return InterlockedIncrement(&VWDD(s)->refcount); }
+static ULONG WINAPI VW_Release(IDirectDraw7 *s) {
+    ULONG ref = InterlockedDecrement(&VWDD(s)->refcount);
+    if (ref == 0) {
+        IDirectDraw7_Release(VWDD(s)->real);
+        HeapFree(GetProcessHeap(), 0, VWDD(s));
+    }
+    return ref;
+}
+
+static HRESULT WINAPI VW_GetAvailableVidMem(IDirectDraw7 *s, LPDDSCAPS2 caps, LPDWORD total, LPDWORD free) {
+    HRESULT hr = IDirectDraw7_GetAvailableVidMem(VWDD(s)->real, caps, total, free);
+    {
+        char buf[128];
+        wsprintfA(buf, "DDraw GetAvailableVidMem: hr=0x%X total=%u free=%u -> spoofing 256MB",
+            hr, total ? *total : 0, free ? *free : 0);
+        DebugLog(buf);
+    }
+    if (total) *total = 256 * 1024 * 1024;
+    if (free) *free = 256 * 1024 * 1024;
+    return DD_OK;
+}
+
+static HRESULT WINAPI VW_GetDeviceIdentifier(IDirectDraw7 *s, LPDDDEVICEIDENTIFIER2 id, DWORD flags) {
+    HRESULT hr = IDirectDraw7_GetDeviceIdentifier(VWDD(s)->real, id, flags);
+    if (SUCCEEDED(hr)) {
+        DebugLog("DDraw GetDeviceIdentifier: spoofing NVIDIA");
+        id->dwVendorId = 0x10DE;
+        id->dwDeviceId = 0x0290;
+        id->dwSubSysId = 0x04561043;
+        id->dwRevision = 0xA1;
+        strncpy(id->szDriver, "nv4_disp.dll", sizeof(id->szDriver)-1);
+        strncpy(id->szDescription, "NVIDIA GeForce 7900 GTX", sizeof(id->szDescription)-1);
+        id->dwWHQLLevel = 1;
+    }
+    return hr;
+}
+
+typedef HRESULT (WINAPI *PFN_DirectDrawCreateEx)(GUID*, LPVOID*, REFIID, IUnknown*);
+static PFN_DirectDrawCreateEx real_DirectDrawCreateEx = NULL;
+
+static HRESULT WINAPI Hooked_DirectDrawCreateEx(GUID *guid, LPVOID *out, REFIID iid, IUnknown *outer) {
+    IDirectDraw7 *real7 = NULL;
+    VRAMWrappedDD7 *wrapped;
+    HRESULT hr;
+
+    DebugLog("Hooked_DirectDrawCreateEx called");
+    hr = real_DirectDrawCreateEx(guid, (LPVOID*)&real7, iid, outer);
+    if (FAILED(hr) || !real7) {
+        DebugLog("Real DirectDrawCreateEx failed");
+        return hr;
+    }
+
+    wrapped = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*wrapped));
+    if (!wrapped) { IDirectDraw7_Release(real7); return E_OUTOFMEMORY; }
+
+    /* Copy real vtable and override key methods */
+    memcpy(&wrapped->hooked_vtbl, real7->lpVtbl, sizeof(IDirectDraw7Vtbl));
+    wrapped->hooked_vtbl.QueryInterface = VW_QueryInterface;
+    wrapped->hooked_vtbl.AddRef = VW_AddRef;
+    wrapped->hooked_vtbl.Release = VW_Release;
+    wrapped->hooked_vtbl.GetAvailableVidMem = VW_GetAvailableVidMem;
+    wrapped->hooked_vtbl.GetDeviceIdentifier = VW_GetDeviceIdentifier;
+
+    wrapped->lpVtbl = &wrapped->hooked_vtbl;
+    wrapped->real = real7;
+    wrapped->refcount = 1;
+    *out = wrapped;
+
+    DebugLog("DirectDrawCreateEx: wrapped with VRAM spoof (256MB)");
+    return DD_OK;
+}
+
+static FARPROC WINAPI Hooked_GetProcAddress(HMODULE hModule, LPCSTR lpProcName) {
+    FARPROC result = real_GetProcAddress(hModule, lpProcName);
+
+    /* Check if this is a request for DirectDrawCreateEx from ddraw.dll */
+    if (lpProcName && ((DWORD_PTR)lpProcName > 0xFFFF) &&
+        strcmp(lpProcName, "DirectDrawCreateEx") == 0 && result) {
+        char buf[128];
+        wsprintfA(buf, "Hooked GetProcAddress: intercepted DirectDrawCreateEx at %p", result);
+        DebugLog(buf);
+        real_DirectDrawCreateEx = (PFN_DirectDrawCreateEx)result;
+        return (FARPROC)Hooked_DirectDrawCreateEx;
+    }
+    return result;
+}
+
+static void InstallGetProcAddressHook(void) {
+    HMODULE game = GetModuleHandleA(NULL);
+    IMAGE_DOS_HEADER *dos;
+    IMAGE_NT_HEADERS *nt;
+    DWORD impDir;
+    IMAGE_IMPORT_DESCRIPTOR *imp;
+
+    if (!game) return;
+
+    dos = (IMAGE_DOS_HEADER*)game;
+    nt = (IMAGE_NT_HEADERS*)((BYTE*)game + dos->e_lfanew);
+    impDir = nt->OptionalHeader.DataDirectory[1].VirtualAddress;
+    if (!impDir) return;
+    imp = (IMAGE_IMPORT_DESCRIPTOR*)((BYTE*)game + impDir);
+
+    while (imp->Name) {
+        char *name = (char*)((BYTE*)game + imp->Name);
+        if (_stricmp(name, "kernel32.dll") == 0) {
+            IMAGE_THUNK_DATA *origThunk = (IMAGE_THUNK_DATA*)((BYTE*)game + imp->OriginalFirstThunk);
+            IMAGE_THUNK_DATA *iatThunk = (IMAGE_THUNK_DATA*)((BYTE*)game + imp->FirstThunk);
+
+            while (origThunk->u1.AddressOfData) {
+                if (!(origThunk->u1.Ordinal & 0x80000000)) {
+                    IMAGE_IMPORT_BY_NAME *ibn = (IMAGE_IMPORT_BY_NAME*)
+                        ((BYTE*)game + origThunk->u1.AddressOfData);
+                    if (strcmp(ibn->Name, "GetProcAddress") == 0) {
+                        DWORD oldProt;
+                        real_GetProcAddress = (PFN_GetProcAddress)iatThunk->u1.Function;
+                        VirtualProtect(&iatThunk->u1.Function, 4, PAGE_READWRITE, &oldProt);
+                        iatThunk->u1.Function = (DWORD_PTR)Hooked_GetProcAddress;
+                        VirtualProtect(&iatThunk->u1.Function, 4, oldProt, &oldProt);
+                        DebugLog("GetProcAddress IAT hook installed");
+                        return;
+                    }
+                }
+                origThunk++;
+                iatThunk++;
+            }
+        }
+        imp++;
+    }
+    DebugLog("WARNING: GetProcAddress not found in IAT");
+}
+
+/* === MessageBoxA IAT Hook - Block error dialogs === */
+
+typedef int (WINAPI *PFN_MessageBoxA)(HWND, LPCSTR, LPCSTR, UINT);
+static PFN_MessageBoxA real_MessageBoxA = NULL;
+
+static int WINAPI Hooked_MessageBoxA(HWND hWnd, LPCSTR text, LPCSTR caption, UINT type) {
+    char buf[512];
+    wsprintfA(buf, "BLOCKED MessageBoxA: caption='%s' text='%.200s'",
+        caption ? caption : "(null)", text ? text : "(null)");
+    DebugLog(buf);
+    return 1; /* IDOK */
+}
+
+/* === Dialog auto-dismiss thread === */
+/* The game creates its own "Zoo Tycoon 2 Error" dialog window (not a MessageBox).
+   This thread watches for it and clicks the "Continue" button automatically. */
+
+static BOOL CALLBACK LogChildWindows(HWND hwnd, LPARAM lParam) {
+    char text[128], cls[128], buf[512];
+    GetWindowTextA(hwnd, text, sizeof(text));
+    GetClassNameA(hwnd, cls, sizeof(cls));
+    wsprintfA(buf, "  Child: hwnd=%p class='%s' text='%s'", hwnd, cls, text);
+    DebugLog(buf);
+    (void)lParam;
+    return TRUE;
+}
+
+/* Find best button to click: prefer "Safe Mode" over "Continue" */
+typedef struct { HWND continueBtn; HWND safeModeBtn; } BtnSearch;
+
+static BOOL CALLBACK FindButtons(HWND hwnd, LPARAM lParam) {
+    char text[64];
+    BtnSearch *bs = (BtnSearch*)lParam;
+    GetWindowTextA(hwnd, text, sizeof(text));
+    if (strstr(text, "Safe Mode") || strstr(text, "safe mode")) {
+        bs->safeModeBtn = hwnd;
+    }
+    if (strstr(text, "Continue") || strstr(text, "continue")) {
+        bs->continueBtn = hwnd;
+    }
+    return TRUE;
+}
+
+static DWORD WINAPI DialogDismissThread(LPVOID param) {
+    int attempts = 0;
+    int dialogsDismissed = 0;
+    (void)param;
+    DebugLog("DialogDismissThread started");
+    while (attempts < 240) { /* Watch for 120 seconds (240 * 500ms) */
+        HWND errorWnd = FindWindowA(NULL, "Zoo Tycoon 2 Error");
+        if (!errorWnd) errorWnd = FindWindowA(NULL, "Zoo Tycoon 2 Warning");
+        if (errorWnd && IsWindowVisible(errorWnd)) {
+            BtnSearch bs = {NULL, NULL};
+            HWND clickBtn = NULL;
+            char buf[256];
+            wsprintfA(buf, "Found dialog #%d: hwnd=%p", dialogsDismissed+1, errorWnd);
+            DebugLog(buf);
+
+            /* Log all child windows for debugging */
+            EnumChildWindows(errorWnd, LogChildWindows, 0);
+
+            /* Find buttons - prefer Safe Mode over Continue */
+            EnumChildWindows(errorWnd, FindButtons, (LPARAM)&bs);
+
+            /* First try Safe Mode (actually continues running), then Continue */
+            if (bs.safeModeBtn) {
+                clickBtn = bs.safeModeBtn;
+                wsprintfA(buf, "BLOCKED dialog #%d: clicking Safe Mode (hwnd=%p)", dialogsDismissed+1, clickBtn);
+            } else if (bs.continueBtn) {
+                clickBtn = bs.continueBtn;
+                wsprintfA(buf, "BLOCKED dialog #%d: clicking Continue (hwnd=%p)", dialogsDismissed+1, clickBtn);
+            }
+
+            if (clickBtn) {
+                DebugLog(buf);
+                {
+                    LONG id = GetWindowLongA(clickBtn, -12); /* GWL_ID */
+                    SendMessageA(errorWnd, WM_COMMAND, (WPARAM)id, (LPARAM)clickBtn);
+                }
+                dialogsDismissed++;
+                Sleep(1000);
+                continue;
+            } else {
+                DebugLog("BLOCKED dialog: no buttons found, sending WM_CLOSE");
+                PostMessageA(errorWnd, WM_CLOSE, 0, 0);
+                dialogsDismissed++;
+                Sleep(1000);
+                continue;
+            }
+        }
+        Sleep(500);
+        attempts++;
+    }
+    {
+        char buf[64];
+        wsprintfA(buf, "DialogDismissThread exiting: dismissed %d dialogs", dialogsDismissed);
+        DebugLog(buf);
+    }
+    return 0;
+}
+
+static void InstallCreateWindowExHook(void) {
+    HMODULE game = GetModuleHandleA(NULL);
+    IMAGE_DOS_HEADER *dos;
+    IMAGE_NT_HEADERS *nt;
+    DWORD impDir;
+    IMAGE_IMPORT_DESCRIPTOR *imp;
+
+    if (!game) return;
+
+    dos = (IMAGE_DOS_HEADER*)game;
+    nt = (IMAGE_NT_HEADERS*)((BYTE*)game + dos->e_lfanew);
+    impDir = nt->OptionalHeader.DataDirectory[1].VirtualAddress;
+    if (!impDir) return;
+    imp = (IMAGE_IMPORT_DESCRIPTOR*)((BYTE*)game + impDir);
+
+    /* Hook MessageBoxA in the game's IAT */
+    while (imp->Name) {
+        char *name = (char*)((BYTE*)game + imp->Name);
+        if (_stricmp(name, "user32.dll") == 0) {
+            IMAGE_THUNK_DATA *origThunk = (IMAGE_THUNK_DATA*)((BYTE*)game + imp->OriginalFirstThunk);
+            IMAGE_THUNK_DATA *iatThunk = (IMAGE_THUNK_DATA*)((BYTE*)game + imp->FirstThunk);
+
+            while (origThunk->u1.AddressOfData) {
+                if (!(origThunk->u1.Ordinal & 0x80000000)) {
+                    IMAGE_IMPORT_BY_NAME *ibn = (IMAGE_IMPORT_BY_NAME*)
+                        ((BYTE*)game + origThunk->u1.AddressOfData);
+                    if (strcmp(ibn->Name, "MessageBoxA") == 0) {
+                        DWORD oldProt;
+                        real_MessageBoxA = (PFN_MessageBoxA)iatThunk->u1.Function;
+                        VirtualProtect(&iatThunk->u1.Function, 4, PAGE_READWRITE, &oldProt);
+                        iatThunk->u1.Function = (DWORD_PTR)Hooked_MessageBoxA;
+                        VirtualProtect(&iatThunk->u1.Function, 4, oldProt, &oldProt);
+                        DebugLog("MessageBoxA IAT hook installed");
+                    }
+                }
+                origThunk++;
+                iatThunk++;
+            }
+        }
+        imp++;
+    }
+
+    /* Start the dialog auto-dismiss thread */
+    {
+        HANDLE hThread = CreateThread(NULL, 0, DialogDismissThread, NULL, 0, NULL);
+        if (hThread) {
+            CloseHandle(hThread);
+            DebugLog("Dialog auto-dismiss thread started");
+        }
+    }
+}
+
+/* === Early patch thread === */
+/* The game's packed code is decompressed before WinMain runs, but after DllMain.
+   This thread polls for the decompressed code and patches error checks early,
+   BEFORE the game's VRAM check runs. */
+
+static DWORD WINAPI EarlyPatchThread(LPVOID param) {
+    HMODULE game = GetModuleHandleA(NULL);
+    BYTE *base;
+    int attempts = 0;
+    (void)param;
+
+    if (!game) return 0;
+    base = (BYTE*)game;
+
+    DebugLog("EarlyPatchThread: waiting for code decompression...");
+
+    /* Poll until the game code at 005BBD38 is decompressed (we know the expected byte pattern) */
+    while (attempts < 200) { /* Up to 10 seconds (200 * 50ms) */
+        BYTE *check = base + (0x005BBEA4 - 0x400000);
+        /* Check if code looks like valid x86 at a known location */
+        if (check[0] >= 0x70 && check[0] <= 0x7F) {
+            /* This looks like a Jcc instruction - code is decompressed! */
+            IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)base;
+            IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+            DWORD imageSize = nt->OptionalHeader.SizeOfImage;
+
+            DebugLog("EarlyPatchThread: code is decompressed, applying early patches");
+
+            /* Scan for VRAM/memory error strings and patch their guards.
+               Only patch the memory-related ones here; other errors are
+               patched later in Direct3DCreate9 when they're actually needed. */
+            {
+                const char *needles[] = {
+                    NULL
+                };
+                IMAGE_SECTION_HEADER *sections = (IMAGE_SECTION_HEADER*)((BYTE*)nt + sizeof(*nt));
+                int ni;
+                for (ni = 0; needles[ni]; ni++) {
+                    const char *needle = needles[ni];
+                    DWORD needleLen = strlen(needle);
+                    DWORD offset;
+                    BYTE *errorStr = NULL;
+
+                    for (offset = 0; offset < imageSize - needleLen; offset++) {
+                        if (memcmp(base + offset, needle, needleLen) == 0) {
+                            errorStr = base + offset;
+                            break;
+                        }
+                    }
+                    if (!errorStr) continue;
+
+                    {
+                        char nb[256];
+                        wsprintfA(nb, "EARLY PATCH: Found '%s' at %p", needle, errorStr);
+                        DebugLog(nb);
+                    }
+
+                    /* Search code sections for PUSH references */
+                    {
+                        DWORD targetAddr = (DWORD)(DWORD_PTR)errorStr;
+                        BYTE targetBytes[4];
+                        DWORD si;
+                        memcpy(targetBytes, &targetAddr, 4);
+
+                        for (si = 0; si < nt->FileHeader.NumberOfSections; si++) {
+                            BYTE *secBase = base + sections[si].VirtualAddress;
+                            DWORD secSize = sections[si].Misc.VirtualSize;
+                            DWORD j;
+
+                            for (j = 0; j < secSize - 4; j++) {
+                                if (memcmp(secBase + j, targetBytes, 4) == 0 &&
+                                    j > 0 && secBase[j-1] == 0x68) {
+                                    DWORD k;
+                                    char nb2[256];
+                                    wsprintfA(nb2, "  PUSH ref at %p", secBase + j - 1);
+                                    DebugLog(nb2);
+
+                                    for (k = j - 2; k > j - 64 && k > 0; k--) {
+                                        BYTE op = secBase[k];
+                                        if (op >= 0x70 && op <= 0x7F && op != 0xEB) {
+                                            signed char rel = (signed char)secBase[k+1];
+                                            DWORD jumpTarget = k + 2 + rel;
+                                            if (jumpTarget > j) {
+                                                DWORD oldProt;
+                                                wsprintfA(nb2, "  EARLY Patched Jcc 0x%02X at %p -> JMP",
+                                                    op, secBase + k);
+                                                DebugLog(nb2);
+                                                VirtualProtect(secBase + k, 1, PAGE_EXECUTE_READWRITE, &oldProt);
+                                                secBase[k] = 0xEB;
+                                                VirtualProtect(secBase + k, 1, oldProt, &oldProt);
+                                            }
+                                            break;
+                                        }
+                                        if (op == 0x0F && k + 1 < secSize &&
+                                            (secBase[k+1] == 0x84 || secBase[k+1] == 0x85)) {
+                                            LONG rel32;
+                                            DWORD jumpTarget;
+                                            memcpy(&rel32, secBase + k + 2, 4);
+                                            jumpTarget = k + 6 + rel32;
+                                            if (jumpTarget > j) {
+                                                DWORD oldProt;
+                                                wsprintfA(nb2, "  EARLY Patched long Jcc at %p -> NOP+JMP", secBase + k);
+                                                DebugLog(nb2);
+                                                VirtualProtect(secBase + k, 6, PAGE_EXECUTE_READWRITE, &oldProt);
+                                                secBase[k] = 0x90;
+                                                secBase[k+1] = 0xE9;
+                                                VirtualProtect(secBase + k, 6, oldProt, &oldProt);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                DebugLog("EarlyPatchThread: early error string patches complete");
+            }
+
+            return 0;
+        }
+        Sleep(50);
+        attempts++;
+    }
+    DebugLog("EarlyPatchThread: timeout waiting for decompression");
+    return 0;
+}
+
 /* From cds_hook.c */
 extern void InstallCDSHook(void);
 
@@ -1501,6 +2055,8 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD r, LPVOID p) {
         DebugLog("=== D3D9 PROXY DLL LOADED ===");
         InstallCDSHook();
         DebugLog("ChangeDisplaySettings IAT hook installed");
+        InstallCreateWindowExHook();
+        /* Early patch thread disabled - using dialog dismiss instead */
     }
     if (r == DLL_PROCESS_DETACH && real_d3d9) {
         FreeLibrary(real_d3d9);
