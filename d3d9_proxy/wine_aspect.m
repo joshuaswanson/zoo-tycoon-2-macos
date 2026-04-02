@@ -117,13 +117,15 @@ static void *aspect_thread(void *arg) {
             ((void(*)(id,SEL,NSSize))objc_msgSend)(win, sel_registerName("setContentMinSize:"), minSz);
             ((void(*)(id,SEL,NSSize))objc_msgSend)(win, sel_registerName("setContentMaxSize:"), maxSz);
 
-            /* Read actual window content size from /tmp/zt2_winsize (written by play.sh monitor) */
+            /* Scale content via CALayer transform (keeps GL framebuffer at 640x480
+               but visually stretches it to fill the window) */
             int targetW = 0, targetH = 0;
-            FILE *f = fopen("/tmp/zt2_winsize", "r");
-            if (f) { fscanf(f, "%d %d", &targetW, &targetH); fclose(f); }
+            {
+                FILE *f = fopen("/tmp/zt2_winsize", "r");
+                if (f) { fscanf(f, "%d %d", &targetW, &targetH); fclose(f); }
+            }
             if (targetW < 650 || targetH < 490) continue;
 
-            /* Resize subviews to match window content area */
             id contentView = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("contentView"));
             if (!contentView) continue;
             id subviews = ((id(*)(id,SEL))objc_msgSend)(contentView, sel_registerName("subviews"));
@@ -133,16 +135,22 @@ static void *aspect_thread(void *arg) {
             for (si = 0; si < svCount; si++) {
                 id sv = ((id(*)(id,SEL,unsigned long))objc_msgSend)(subviews,
                     sel_registerName("objectAtIndex:"), si);
-                /* Get subview width via bounds.size.width workaround (no stret needed):
-                   Use NSView.frame.size which for the main content is 640x480 */
-                NSSize svSize;
-                /* We know Wine sets subviews to 640x480. Just check and resize if window is larger. */
-                NSSize newSize = {(CGFloat)targetW, (CGFloat)targetH};
-                struct objc_super sup;
-                sup.receiver = sv;
-                sup.super_class = class_getSuperclass(object_getClass(sv));
-                ((void(*)(struct objc_super*, SEL, NSSize))objc_msgSendSuper)(&sup,
-                    sel_registerName("setFrameSize:"), newSize);
+                id layer = ((id(*)(id,SEL))objc_msgSend)(sv, sel_registerName("layer"));
+                if (!layer) continue;
+                /* Scale from 640x480 to target size */
+                double sx = (double)targetW / 640.0;
+                double sy = (double)targetH / 480.0;
+                if (sx > 1.01 || sy > 1.01) {
+                    typedef struct { double m[16]; } CATransform3D;
+                    CATransform3D t = {{sx,0,0,0, 0,sy,0,0, 0,0,1,0, 0,0,0,1}};
+                    typedef struct { double x, y; } CGPoint;
+                    CGPoint anchor = {0, 0};
+                    ((void(*)(id,SEL,CGPoint))objc_msgSend)(layer, sel_registerName("setAnchorPoint:"), anchor);
+                    CGPoint pos = {0, 0};
+                    ((void(*)(id,SEL,CGPoint))objc_msgSend)(layer, sel_registerName("setPosition:"), pos);
+                    ((void(*)(id,SEL,CATransform3D))objc_msgSend)(layer, sel_registerName("setTransform:"), t);
+                    ((void(*)(id,SEL,BOOL))objc_msgSend)(layer, sel_registerName("setMasksToBounds:"), NO);
+                }
             }
         }
     }
