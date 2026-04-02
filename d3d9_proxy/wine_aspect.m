@@ -33,18 +33,16 @@ static void swz_adjustFeaturesForState(id self, SEL _cmd) {
 /* Block Wine from resetting window to 640x480 during/after resize */
 typedef void (*SetFrameFromWineIMP)(id, SEL, NSRect);
 static SetFrameFromWineIMP orig_setFrameFromWine = NULL;
-static int g_gameWindowSeen = 0;
-static int g_allowReset = 0; /* temporarily allow 640x480 reset from our own code */
 static void swz_setFrameFromWine(id self, SEL _cmd, NSRect contentRect) {
     id title = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("title"));
     if (title) {
         const char *t = ((const char*(*)(id,SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
-        if (t && strstr(t, "Zoo Tycoon")) {
-            /* After initial setup, always block Wine's 640x480 resets (unless we're doing our own reset) */
-            if (g_gameWindowSeen && !g_allowReset && contentRect.size.width < 650 && contentRect.size.height < 490) {
-                return;
-            }
-            g_gameWindowSeen = 1;
+        if (t && strstr(t, "Zoo Tycoon") && contentRect.size.width < 650 && contentRect.size.height < 490) {
+            /* Block 640x480 reset if user has resized (size file > 660) */
+            int curW = 0;
+            FILE *f = fopen("/tmp/zt2_winsize", "r");
+            if (f) { fscanf(f, "%d", &curW); fclose(f); }
+            if (curW > 660) return;
         }
     }
     orig_setFrameFromWine(self, _cmd, contentRect);
@@ -135,16 +133,32 @@ static void swz_flushBuffer(id self, SEL _cmd) {
 typedef void (*SetFrameDisplayIMP)(id, SEL, NSRect, BOOL);
 static SetFrameDisplayIMP orig_setFrameDisplay = NULL;
 static void swz_setFrameDisplay(id self, SEL _cmd, NSRect frame, BOOL flag) {
-    if (g_gameWindowSeen) {
-        id title = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("title"));
-        if (title) {
-            const char *t = ((const char*(*)(id,SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
-            if (t && strstr(t, "Zoo Tycoon") && frame.size.width < 650 && frame.size.height < 520 && !g_allowReset) {
-                return; /* Block reset to 640x480 */
-            }
+    id title = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("title"));
+    if (title) {
+        const char *t = ((const char*(*)(id,SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
+        if (t && strstr(t, "Zoo Tycoon") && frame.size.width < 650 && frame.size.height < 520) {
+            int curW = 0;
+            FILE *f = fopen("/tmp/zt2_winsize", "r");
+            if (f) { fscanf(f, "%d", &curW); fclose(f); }
+            if (curW > 660) return;
         }
     }
     orig_setFrameDisplay(self, _cmd, frame, flag);
+}
+
+/* Block Wine's resize query that clamps to 640x480 during drag */
+typedef NSSize (*WindowWillResizeIMP)(id, SEL, id, NSSize);
+static WindowWillResizeIMP orig_windowWillResize = NULL;
+static NSSize swz_windowWillResize(id self, SEL _cmd, id sender, NSSize frameSize) {
+    /* Return the user's requested size directly - bypass Wine's query */
+    id title = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("title"));
+    if (title) {
+        const char *t = ((const char*(*)(id,SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
+        if (t && strstr(t, "Zoo Tycoon")) {
+            return frameSize; /* Don't let Wine clamp it */
+        }
+    }
+    return orig_windowWillResize(self, _cmd, sender, frameSize);
 }
 
 /* --- Aspect thread --- */
@@ -166,6 +180,11 @@ static void *aspect_thread(void *arg) {
             if (m2) {
                 orig_adjustFeatures = (AdjustFeaturesIMP)method_getImplementation(m2);
                 method_setImplementation(m2, (IMP)swz_adjustFeaturesForState);
+            }
+            Method m3w = class_getInstanceMethod(WineWindow, sel_registerName("windowWillResize:toSize:"));
+            if (m3w) {
+                orig_windowWillResize = (WindowWillResizeIMP)method_getImplementation(m3w);
+                method_setImplementation(m3w, (IMP)swz_windowWillResize);
             }
             Method m3a = class_getInstanceMethod(WineWindow, sel_registerName("setFrame:display:"));
             if (m3a) {
@@ -210,11 +229,9 @@ static void *aspect_thread(void *arg) {
             {
                 static int resetDone = 0;
                 if (!resetDone) {
-                    g_allowReset = 1;
                     NSSize newContentSize = {640, 480};
                     ((void(*)(id,SEL,NSSize))objc_msgSend)(win,
                         sel_registerName("setContentSize:"), newContentSize);
-                    g_allowReset = 0;
                     resetDone = 1;
                 }
             }
