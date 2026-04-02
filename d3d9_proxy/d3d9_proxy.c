@@ -533,6 +533,28 @@ static WNDPROC g_origWndProc = NULL;
 
 /* Window proc subclass to lock 4:3 aspect ratio during resize */
 static LRESULT CALLBACK AspectWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    /* Resize sync: when macOS window changes, tell Wine via SetWindowPos */
+    /* Check on every message (WM_TIMER may not fire reliably in Wine) */
+    if (msg == WM_TIMER || msg == WM_PAINT || msg == WM_WINDOWPOSCHANGED || msg == WM_SIZE) {
+        static int resizeCheckCounter = 0;
+        if (++resizeCheckCounter % 10 != 0) goto skip_resize;  /* Only check every 10th message */
+        static int lastSyncW = 0, lastSyncH = 0;
+        int macW = 0, macH = 0;
+        char sizePath[MAX_PATH];
+        strcpy(sizePath, g_dllDir);
+        strcat(sizePath, "zt2_winsize.txt");
+        FILE *f = fopen(sizePath, "r");
+        if (f) { fscanf(f, "%d %d", &macW, &macH); fclose(f); }
+        if (macW > 660 && macH > 500 && (macW != lastSyncW || macH != lastSyncH)) {
+            LONG style = GetWindowLongA(hwnd, GWL_STYLE);
+            RECT rc = {0, 0, macW, macH};
+            AdjustWindowRect(&rc, style, FALSE);
+            SetWindowPos(hwnd, NULL, 0, 0, rc.right-rc.left, rc.bottom-rc.top,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            lastSyncW = macW; lastSyncH = macH;
+        }
+        skip_resize: ;
+    }
     if (msg == WM_SIZING && lp) {
         RECT *r = (RECT*)lp;
         LONG w = r->right - r->left;
@@ -610,6 +632,49 @@ static LRESULT CALLBACK AspectWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 SetWindowPos(hwnd, NULL, 0, 0, frameW, frameH,
                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
                 inCorrection = 0;
+            }
+        }
+    }
+    /* Block Wine's 640x480 snap-back from Win32 side */
+    if (msg == WM_WINDOWPOSCHANGING && lp) {
+        WINDOWPOS *pos = (WINDOWPOS*)lp;
+        if (!(pos->flags & SWP_NOSIZE) && pos->cx > 0 && pos->cy > 0 && pos->cx < 660) {
+            int curW = 0;
+            char sizePath[MAX_PATH];
+            strcpy(sizePath, g_dllDir);
+            strcat(sizePath, "zt2_winsize.txt");
+            FILE *f = fopen(sizePath, "r");
+            if (!f) { f = fopen("Z:\\tmp\\zt2_winsize", "r"); }
+            if (f) { fscanf(f, "%d", &curW); fclose(f); }
+            if (curW > 660) {
+                pos->flags |= SWP_NOSIZE; /* Block the size change */
+            }
+        }
+    }
+    /* Reset D3D backbuffer when macOS window is larger than backbuffer */
+    if (msg == WM_SIZE && g_device && g_origDevVtbl) {
+        /* Read actual macOS size from file (Wine's WM_SIZE lp reports 640x480) */
+        UINT newW = 0, newH = 0;
+        { FILE *f = fopen("Z:\\tmp\\zt2_winsize", "r"); if (f) { fscanf(f, "%u %u", &newW, &newH); fclose(f); } }
+        if (newW > 660 && newH > 500 && (newW != g_bbWidth || newH != g_bbHeight)) {
+            D3DPRESENT_PARAMETERS pp;
+            memset(&pp, 0, sizeof(pp));
+            pp.BackBufferWidth = newW;
+            pp.BackBufferHeight = newH;
+            pp.BackBufferFormat = D3DFMT_UNKNOWN;
+            pp.BackBufferCount = 1;
+            pp.SwapEffect = 1;
+            pp.Windowed = TRUE;
+            pp.EnableAutoDepthStencil = TRUE;
+            pp.AutoDepthStencilFormat = 75;
+            pp.PresentationInterval = 1;
+            {
+                HRESULT hr = g_origDevVtbl->Reset(g_device, &pp);
+                if (SUCCEEDED(hr)) {
+                    char buf[64]; wsprintfA(buf, "D3D Reset OK: %ux%u", newW, newH);
+                    DebugLog(buf);
+                    g_bbWidth = newW; g_bbHeight = newH;
+                }
             }
         }
     }
@@ -2096,6 +2161,34 @@ static DWORD WINAPI EarlyPatchThread(LPVOID param) {
 /* From cds_hook.c */
 extern void InstallCDSHook(void);
 
+/* Resize sync: reads macOS window size from /tmp/zt2_winsize and calls
+   SetWindowPos to sync Wine's internal state with the actual window */
+static DWORD WINAPI ResizeSyncThread(LPVOID param) {
+    int lastW = 0, lastH = 0;
+    (void)param;
+    { FILE *dbg = fopen("Z:\\tmp\\resize_sync_alive.txt", "w"); if(dbg){fputs("alive\n",dbg);fclose(dbg);} }
+    while (1) {
+        Sleep(200);
+        if (!g_deviceHwnd) continue;
+        int macW = 0, macH = 0;
+        FILE *f = fopen("Z:\\tmp\\zt2_winsize", "r");
+        if (f) { fscanf(f, "%d %d", &macW, &macH); fclose(f); }
+        if (macW > 660 && macH > 500 && (macW != lastW || macH != lastH)) {
+            char buf[128];
+            wsprintfA(buf, "ResizeSync: %dx%d -> SetWindowPos hwnd=%p", macW, macH, g_deviceHwnd);
+            DebugLog(buf);
+            LONG style = GetWindowLongA(g_deviceHwnd, GWL_STYLE);
+            RECT rc = {0, 0, macW, macH};
+            AdjustWindowRect(&rc, style, FALSE);
+            SetWindowPos(g_deviceHwnd, NULL, 0, 0,
+                rc.right - rc.left, rc.bottom - rc.top,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            lastW = macW; lastH = macH;
+        }
+    }
+    return 0;
+}
+
 /* Early window watcher: finds game window and installs AspectWndProc
    BEFORE D3D init, so intro videos get 4:3 aspect lock during resize */
 static DWORD WINAPI EarlyWindowWatcher(LPVOID param) {
@@ -2120,6 +2213,8 @@ static DWORD WINAPI EarlyWindowWatcher(LPVOID param) {
             g_origWndProc = (WNDPROC)SetWindowLongA(hw, GWL_WNDPROC, (LONG)AspectWndProc);
             g_deviceHwnd = hw;
             DebugLog("Early window watcher: installed AspectWndProc on game window");
+            /* Start a timer for resize sync (can't create threads from Wine context) */
+            SetTimer(hw, 42, 200, NULL); /* Timer ID 42, 200ms interval */
             break;
         }
         Sleep(100);
@@ -2136,6 +2231,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD r, LPVOID p) {
         DebugLog("ChangeDisplaySettings IAT hook installed");
         InstallCreateWindowExHook();
         CreateThread(NULL, 0, EarlyWindowWatcher, NULL, 0, NULL);
+        /* ResizeSyncThread is started from EarlyWindowWatcher after finding the game window */
     }
     if (r == DLL_PROCESS_DETACH && real_d3d9) {
         FreeLibrary(real_d3d9);

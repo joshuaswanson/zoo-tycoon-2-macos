@@ -1,7 +1,3 @@
-/*
- * wine_aspect.m - Enforce 4:3 aspect ratio and scale game content
- * Loaded as reexport wrapper around winemac.so
- */
 #include <objc/runtime.h>
 #include <objc/message.h>
 #include <pthread.h>
@@ -13,8 +9,6 @@ typedef double CGFloat;
 typedef struct { CGFloat width, height; } NSSize;
 typedef struct { CGFloat x, y; } NSPoint;
 typedef struct { NSPoint origin; NSSize size; } NSRect;
-
-/* --- Swizzled implementations --- */
 
 static BOOL swz_preventResizing(id self, SEL _cmd) { return NO; }
 
@@ -30,138 +24,38 @@ static void swz_adjustFeaturesForState(id self, SEL _cmd) {
     ((void(*)(id,SEL,NSSize))objc_msgSend)(self, sel_registerName("setContentMaxSize:"), maxSize);
 }
 
-/* Block Wine from resetting window to 640x480 during/after resize */
-typedef void (*SetFrameFromWineIMP)(id, SEL, NSRect);
-static SetFrameFromWineIMP orig_setFrameFromWine = NULL;
-static void swz_setFrameFromWine(id self, SEL _cmd, NSRect contentRect) {
+typedef NSSize (*WindowWillResizeIMP)(id, SEL, id, NSSize);
+static WindowWillResizeIMP orig_windowWillResize = NULL;
+static NSSize swz_windowWillResize(id self, SEL _cmd, id sender, NSSize frameSize) {
     id title = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("title"));
     if (title) {
         const char *t = ((const char*(*)(id,SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
-        if (t && strstr(t, "Zoo Tycoon") && contentRect.size.width < 650 && contentRect.size.height < 490) {
-            /* Block 640x480 reset if user has resized (size file > 660) */
-            int curW = 0;
-            FILE *f = fopen("/tmp/zt2_winsize", "r");
-            if (f) { fscanf(f, "%d", &curW); fclose(f); }
-            if (curW > 660) return;
+        if (t && strstr(t, "Zoo Tycoon")) return frameSize;
+    }
+    return orig_windowWillResize(self, _cmd, sender, frameSize);
+}
+
+/* Block Wine's setFrameFromWine 640x480 resets when user has resized */
+typedef void (*SetFrameFromWineIMP)(id, SEL, NSRect);
+static SetFrameFromWineIMP orig_setFrameFromWine = NULL;
+static void swz_setFrameFromWine(id self, SEL _cmd, NSRect contentRect) {
+    if (contentRect.size.width < 650 && contentRect.size.height < 490) {
+        /* During live resize or when window is larger, block the 640x480 reset */
+        BOOL inResize = ((BOOL(*)(id,SEL))objc_msgSend)(self, sel_registerName("inLiveResize"));
+        if (inResize) return;
+
+        /* Also check size file */
+        int curW = 0, curH = 0;
+        FILE *f = fopen("/tmp/zt2_winsize", "r");
+        if (f) { fscanf(f, "%d %d", &curW, &curH); fclose(f); }
+        if (curW > 660 && curH > 500) {
+            contentRect.size.width = curW;
+            contentRect.size.height = curH;
         }
     }
     orig_setFrameFromWine(self, _cmd, contentRect);
 }
 
-/* --- GL scaling via flushBuffer swizzle --- */
-typedef void (*FlushBufferIMP)(id, SEL);
-static FlushBufferIMP orig_flushBuffer = NULL;
-
-/* OpenGL function pointers (loaded dynamically) */
-typedef unsigned int GLenum;
-typedef int GLint;
-typedef void (*PFN_glGetIntegerv)(GLenum, GLint*);
-typedef void (*PFN_glBindFramebuffer)(GLenum, unsigned int);
-typedef void (*PFN_glBlitFramebuffer)(int,int,int,int,int,int,int,int,unsigned int,GLenum);
-typedef void (*PFN_glGenFramebuffers)(int, unsigned int*);
-typedef void (*PFN_glGenTextures)(int, unsigned int*);
-typedef void (*PFN_glBindTexture)(GLenum, unsigned int);
-typedef void (*PFN_glTexImage2D)(GLenum,int,int,int,int,int,GLenum,GLenum,const void*);
-typedef void (*PFN_glTexParameteri)(GLenum,GLenum,int);
-typedef void (*PFN_glFramebufferTexture2D)(GLenum,GLenum,GLenum,unsigned int,int);
-
-static PFN_glBlitFramebuffer p_glBlitFramebuffer = NULL;
-static PFN_glBindFramebuffer p_glBindFramebuffer = NULL;
-static PFN_glGetIntegerv p_glGetIntegerv = NULL;
-static int gl_loaded = 0;
-
-static void load_gl(void) {
-    extern void *dlsym(void*, const char*);
-    #define RTLD_DEFAULT ((void*)-2)
-    p_glBlitFramebuffer = (PFN_glBlitFramebuffer)dlsym(RTLD_DEFAULT, "glBlitFramebuffer");
-    p_glBindFramebuffer = (PFN_glBindFramebuffer)dlsym(RTLD_DEFAULT, "glBindFramebuffer");
-    p_glGetIntegerv = (PFN_glGetIntegerv)dlsym(RTLD_DEFAULT, "glGetIntegerv");
-    gl_loaded = 1;
-}
-
-static void swz_flushBuffer(id self, SEL _cmd) {
-    if (!gl_loaded) load_gl();
-
-    int targetW = 0, targetH = 0;
-    { FILE *f = fopen("/tmp/zt2_winsize", "r"); if (f) { fscanf(f, "%d %d", &targetW, &targetH); fclose(f); } }
-
-    if (p_glBlitFramebuffer && p_glBindFramebuffer && p_glGetIntegerv &&
-        targetW > 660 && targetH > 500) {
-        /* Save game's 640x480 rendering to temp FBO before any context changes */
-        static unsigned int tFBO = 0, tTex = 0;
-        PFN_glGenFramebuffers pGenFBO = (PFN_glGenFramebuffers)dlsym(RTLD_DEFAULT, "glGenFramebuffers");
-        PFN_glGenTextures pGenTex = (PFN_glGenTextures)dlsym(RTLD_DEFAULT, "glGenTextures");
-        PFN_glBindTexture pBindTex = (PFN_glBindTexture)dlsym(RTLD_DEFAULT, "glBindTexture");
-        PFN_glTexImage2D pTexImg = (PFN_glTexImage2D)dlsym(RTLD_DEFAULT, "glTexImage2D");
-        PFN_glTexParameteri pTexParam = (PFN_glTexParameteri)dlsym(RTLD_DEFAULT, "glTexParameteri");
-        PFN_glFramebufferTexture2D pFBTex = (PFN_glFramebufferTexture2D)dlsym(RTLD_DEFAULT, "glFramebufferTexture2D");
-
-        if (pGenFBO && pGenTex && pBindTex && pTexImg && pFBTex) {
-            if (!tFBO) {
-                pGenFBO(1, &tFBO); pGenTex(1, &tTex);
-                pBindTex(0x0DE1, tTex);
-                pTexImg(0x0DE1, 0, 0x8058, 640, 480, 0, 0x1908, 0x1401, 0);
-                pTexParam(0x0DE1, 0x2801, 0x2601);
-                pTexParam(0x0DE1, 0x2800, 0x2601);
-                p_glBindFramebuffer(0x8D40, tFBO);
-                pFBTex(0x8D40, 0x8CE0, 0x0DE1, tTex, 0);
-            }
-            GLint pR, pD;
-            p_glGetIntegerv(0x8CA8, &pR);
-            p_glGetIntegerv(0x8CA6, &pD);
-
-            /* Step 1: Save game's 640x480 to temp FBO */
-            p_glBindFramebuffer(0x8CA8, 0);
-            p_glBindFramebuffer(0x8CA9, tFBO);
-            p_glBlitFramebuffer(0, 0, 640, 480, 0, 0, 640, 480, 0x4000, 0x2600);
-
-            /* Step 2: Stretch from temp to default FBO at target size.
-               The view resize + updateForGLSubviews expands the FBO over time. */
-            p_glBindFramebuffer(0x8CA8, tFBO);
-            p_glBindFramebuffer(0x8CA9, 0);
-            p_glBlitFramebuffer(0, 0, 640, 480, 0, 0, targetW, targetH, 0x4000, 0x2601);
-
-            p_glBindFramebuffer(0x8CA8, pR);
-            p_glBindFramebuffer(0x8CA9, pD);
-        }
-    }
-
-    orig_flushBuffer(self, _cmd);
-}
-
-/* Block setFrame:display: from resetting to 640x480 */
-typedef void (*SetFrameDisplayIMP)(id, SEL, NSRect, BOOL);
-static SetFrameDisplayIMP orig_setFrameDisplay = NULL;
-static void swz_setFrameDisplay(id self, SEL _cmd, NSRect frame, BOOL flag) {
-    id title = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("title"));
-    if (title) {
-        const char *t = ((const char*(*)(id,SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
-        if (t && strstr(t, "Zoo Tycoon") && frame.size.width < 650 && frame.size.height < 520) {
-            int curW = 0;
-            FILE *f = fopen("/tmp/zt2_winsize", "r");
-            if (f) { fscanf(f, "%d", &curW); fclose(f); }
-            if (curW > 660) return;
-        }
-    }
-    orig_setFrameDisplay(self, _cmd, frame, flag);
-}
-
-/* Block Wine's resize query that clamps to 640x480 during drag */
-typedef NSSize (*WindowWillResizeIMP)(id, SEL, id, NSSize);
-static WindowWillResizeIMP orig_windowWillResize = NULL;
-static NSSize swz_windowWillResize(id self, SEL _cmd, id sender, NSSize frameSize) {
-    /* Return the user's requested size directly - bypass Wine's query */
-    id title = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("title"));
-    if (title) {
-        const char *t = ((const char*(*)(id,SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
-        if (t && strstr(t, "Zoo Tycoon")) {
-            return frameSize; /* Don't let Wine clamp it */
-        }
-    }
-    return orig_windowWillResize(self, _cmd, sender, frameSize);
-}
-
-/* --- Aspect thread --- */
 static int g_swizzled = 0;
 
 static void *aspect_thread(void *arg) {
@@ -171,104 +65,35 @@ static void *aspect_thread(void *arg) {
         usleep(200000);
         Class WineWindow = objc_getClass("WineWindow");
         if (!WineWindow) continue;
-
-        /* Swizzle once */
         if (!g_swizzled) {
-            Method m1 = class_getInstanceMethod(WineWindow, sel_registerName("preventResizing"));
-            if (m1) method_setImplementation(m1, (IMP)swz_preventResizing);
-            Method m2 = class_getInstanceMethod(WineWindow, sel_registerName("adjustFeaturesForState"));
-            if (m2) {
-                orig_adjustFeatures = (AdjustFeaturesIMP)method_getImplementation(m2);
-                method_setImplementation(m2, (IMP)swz_adjustFeaturesForState);
-            }
-            Method m3w = class_getInstanceMethod(WineWindow, sel_registerName("windowWillResize:toSize:"));
-            if (m3w) {
-                orig_windowWillResize = (WindowWillResizeIMP)method_getImplementation(m3w);
-                method_setImplementation(m3w, (IMP)swz_windowWillResize);
-            }
-            Method m3a = class_getInstanceMethod(WineWindow, sel_registerName("setFrame:display:"));
-            if (m3a) {
-                orig_setFrameDisplay = (SetFrameDisplayIMP)method_getImplementation(m3a);
-                method_setImplementation(m3a, (IMP)swz_setFrameDisplay);
-            }
-            Method m3 = class_getInstanceMethod(WineWindow, sel_registerName("setFrameFromWine:"));
-            if (m3) {
-                orig_setFrameFromWine = (SetFrameFromWineIMP)method_getImplementation(m3);
-                method_setImplementation(m3, (IMP)swz_setFrameFromWine);
-            }
-            /* Swizzle WineOpenGLContext.flushBuffer for GL scaling */
-            Class WineGLCtx = objc_getClass("WineOpenGLContext");
-            if (WineGLCtx) {
-                Method m4 = class_getInstanceMethod(WineGLCtx, sel_registerName("flushBuffer"));
-                if (m4) {
-                    orig_flushBuffer = (FlushBufferIMP)method_getImplementation(m4);
-                    method_setImplementation(m4, (IMP)swz_flushBuffer);
-                }
-            }
+            Method m;
+            m = class_getInstanceMethod(WineWindow, sel_registerName("preventResizing"));
+            if (m) method_setImplementation(m, (IMP)swz_preventResizing);
+            m = class_getInstanceMethod(WineWindow, sel_registerName("adjustFeaturesForState"));
+            if (m) { orig_adjustFeatures = (AdjustFeaturesIMP)method_getImplementation(m); method_setImplementation(m, (IMP)swz_adjustFeaturesForState); }
+            m = class_getInstanceMethod(WineWindow, sel_registerName("windowWillResize:toSize:"));
+            if (m) { orig_windowWillResize = (WindowWillResizeIMP)method_getImplementation(m); method_setImplementation(m, (IMP)swz_windowWillResize); }
+            m = class_getInstanceMethod(WineWindow, sel_registerName("setFrameFromWine:"));
+            if (m) { orig_setFrameFromWine = (SetFrameFromWineIMP)method_getImplementation(m); method_setImplementation(m, (IMP)swz_setFrameFromWine); }
             g_swizzled = 1;
         }
-
-        /* Set aspect ratio and resize subviews on all WineWindows */
-        id app = ((id(*)(id,SEL))objc_msgSend)((id)objc_getClass("NSApplication"),
-            sel_registerName("sharedApplication"));
+        /* Just set aspect ratio on all WineWindows */
+        id app = ((id(*)(id,SEL))objc_msgSend)((id)objc_getClass("NSApplication"), sel_registerName("sharedApplication"));
         if (!app) continue;
         id windows = ((id(*)(id,SEL))objc_msgSend)(app, sel_registerName("windows"));
         if (!windows) continue;
         unsigned long count = ((unsigned long(*)(id,SEL))objc_msgSend)(windows, sel_registerName("count"));
         unsigned long j;
         for (j = 0; j < count; j++) {
-            id win = ((id(*)(id,SEL,unsigned long))objc_msgSend)(windows,
-                sel_registerName("objectAtIndex:"), j);
-            if (!win || !((BOOL(*)(id,SEL,Class))objc_msgSend)(win,
-                sel_registerName("isKindOfClass:"), WineWindow)) continue;
-
-            /* Ensure resizable + aspect ratio + correct content size */
+            id win = ((id(*)(id,SEL,unsigned long))objc_msgSend)(windows, sel_registerName("objectAtIndex:"), j);
+            if (!win || !((BOOL(*)(id,SEL,Class))objc_msgSend)(win, sel_registerName("isKindOfClass:"), WineWindow)) continue;
             NSSize ratio = {4.0, 3.0};
             ((void(*)(id,SEL,NSSize))objc_msgSend)(win, sel_registerName("setContentAspectRatio:"), ratio);
-            /* Reset to 640x480 content on first launch */
-            {
-                static int resetDone = 0;
-                if (!resetDone) {
-                    NSSize newContentSize = {640, 480};
-                    ((void(*)(id,SEL,NSSize))objc_msgSend)(win,
-                        sel_registerName("setContentSize:"), newContentSize);
-                    resetDone = 1;
-                }
-            }
             unsigned long mask = ((unsigned long(*)(id,SEL))objc_msgSend)(win, sel_registerName("styleMask"));
-            if (!(mask & 8))
-                ((void(*)(id,SEL,unsigned long))objc_msgSend)(win, sel_registerName("setStyleMask:"), mask | 8);
+            if (!(mask & 8)) ((void(*)(id,SEL,unsigned long))objc_msgSend)(win, sel_registerName("setStyleMask:"), mask | 8);
             NSSize minSz = {640, 480}, maxSz = {10000, 10000};
             ((void(*)(id,SEL,NSSize))objc_msgSend)(win, sel_registerName("setContentMinSize:"), minSz);
             ((void(*)(id,SEL,NSSize))objc_msgSend)(win, sel_registerName("setContentMaxSize:"), maxSz);
-
-            /* Resize subviews to expand GL surface (flushBuffer handles the blit) */
-            {
-                int targetW = 0, targetH = 0;
-                FILE *f = fopen("/tmp/zt2_winsize", "r");
-                if (f) { fscanf(f, "%d %d", &targetW, &targetH); fclose(f); }
-                if (targetW > 650 && targetH > 490) {
-                    id contentView = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("contentView"));
-                    if (contentView) {
-                        id subviews = ((id(*)(id,SEL))objc_msgSend)(contentView, sel_registerName("subviews"));
-                        if (subviews) {
-                            unsigned long svCount = ((unsigned long(*)(id,SEL))objc_msgSend)(subviews, sel_registerName("count"));
-                            unsigned long si;
-                            for (si = 0; si < svCount; si++) {
-                                id sv = ((id(*)(id,SEL,unsigned long))objc_msgSend)(subviews, sel_registerName("objectAtIndex:"), si);
-                                NSSize newSize = {(CGFloat)targetW, (CGFloat)targetH};
-                                struct objc_super sup;
-                                sup.receiver = sv;
-                                sup.super_class = class_getSuperclass(object_getClass(sv));
-                                ((void(*)(struct objc_super*, SEL, NSSize))objc_msgSendSuper)(&sup,
-                                    sel_registerName("setFrameSize:"), newSize);
-                            }
-                        }
-                        /* Tell GL contexts the view changed */
-                        ((void(*)(id,SEL))objc_msgSend)(win, sel_registerName("updateForGLSubviews"));
-                    }
-                }
-            }
         }
     }
     return NULL;

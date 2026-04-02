@@ -14,6 +14,12 @@ sleep 3
 wine click_continue.exe 2>/dev/null &
 disown
 
+# Resize sync: reads macOS window size and calls Win32 SetWindowPos
+# Delay to ensure wineserver is ready
+sleep 5
+wine resize_sync.exe 2>/dev/null &
+disown
+
 # Monitor macOS window size for D3D Present stretching
 (while pgrep -qf wine-preloader 2>/dev/null; do
     swift -e '
