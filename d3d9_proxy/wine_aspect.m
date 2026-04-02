@@ -7,9 +7,12 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <string.h>
 
 typedef double CGFloat;
 typedef struct { CGFloat width, height; } NSSize;
+typedef struct { CGFloat x, y; } NSPoint;
+typedef struct { NSPoint origin; NSSize size; } NSRect;
 
 /* --- Swizzled implementations --- */
 
@@ -25,6 +28,25 @@ static void swz_adjustFeaturesForState(id self, SEL _cmd) {
     NSSize maxSize = {10000, 10000};
     ((void(*)(id,SEL,NSSize))objc_msgSend)(self, sel_registerName("setContentMinSize:"), minSize);
     ((void(*)(id,SEL,NSSize))objc_msgSend)(self, sel_registerName("setContentMaxSize:"), maxSize);
+}
+
+/* Block Wine from resetting window to 640x480 during/after resize */
+typedef void (*SetFrameFromWineIMP)(id, SEL, NSRect);
+static SetFrameFromWineIMP orig_setFrameFromWine = NULL;
+static void swz_setFrameFromWine(id self, SEL _cmd, NSRect contentRect) {
+    id title = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("title"));
+    if (title) {
+        const char *t = ((const char*(*)(id,SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
+        if (t && strstr(t, "Zoo Tycoon")) {
+            if (contentRect.size.width < 650 && contentRect.size.height < 490) {
+                int curW = 0, curH = 0;
+                FILE *f = fopen("/tmp/zt2_winsize", "r");
+                if (f) { fscanf(f, "%d %d", &curW, &curH); fclose(f); }
+                if (curW > 660) return;
+            }
+        }
+    }
+    orig_setFrameFromWine(self, _cmd, contentRect);
 }
 
 /* --- Aspect thread --- */
@@ -47,6 +69,11 @@ static void *aspect_thread(void *arg) {
                 orig_adjustFeatures = (AdjustFeaturesIMP)method_getImplementation(m2);
                 method_setImplementation(m2, (IMP)swz_adjustFeaturesForState);
             }
+            Method m3 = class_getInstanceMethod(WineWindow, sel_registerName("setFrameFromWine:"));
+            if (m3) {
+                orig_setFrameFromWine = (SetFrameFromWineIMP)method_getImplementation(m3);
+                method_setImplementation(m3, (IMP)swz_setFrameFromWine);
+            }
             g_swizzled = 1;
         }
 
@@ -64,9 +91,25 @@ static void *aspect_thread(void *arg) {
             if (!win || !((BOOL(*)(id,SEL,Class))objc_msgSend)(win,
                 sel_registerName("isKindOfClass:"), WineWindow)) continue;
 
-            /* Ensure resizable + aspect ratio */
+            /* Ensure resizable + aspect ratio + correct content size */
             NSSize ratio = {4.0, 3.0};
             ((void(*)(id,SEL,NSSize))objc_msgSend)(win, sel_registerName("setContentAspectRatio:"), ratio);
+            /* If the content area is < 640x480 (title bar eating space), enlarge once */
+            {
+                static int enlarged = 0;
+                if (!enlarged) {
+                    int curW = 0, curH = 0;
+                    FILE *f = fopen("/tmp/zt2_winsize", "r");
+                    if (f) { fscanf(f, "%d %d", &curW, &curH); fclose(f); }
+                    if (curW > 0 && curW <= 640 && curH < 480) {
+                        /* Content is smaller than 640x480 - enlarge to compensate for title bar */
+                        NSSize newContentSize = {640, 480};
+                        ((void(*)(id,SEL,NSSize))objc_msgSend)(win,
+                            sel_registerName("setContentSize:"), newContentSize);
+                        enlarged = 1;
+                    }
+                }
+            }
             unsigned long mask = ((unsigned long(*)(id,SEL))objc_msgSend)(win, sel_registerName("styleMask"));
             if (!(mask & 8))
                 ((void(*)(id,SEL,unsigned long))objc_msgSend)(win, sel_registerName("setStyleMask:"), mask | 8);

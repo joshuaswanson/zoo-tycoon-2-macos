@@ -2105,13 +2105,17 @@ static DWORD WINAPI EarlyWindowWatcher(LPVOID param) {
         HWND hw = FindWindowA(NULL, "Zoo Tycoon 2");
         if (!hw) hw = FindWindowA(NULL, "Zoo Tycoon 2 Ultimate Collection");
         if (hw && !g_origWndProc) {
-            /* Add resizable border + aspect lock */
+            /* Add window controls and resize border */
             LONG style = GetWindowLongA(hw, GWL_STYLE);
             if (!(style & WS_THICKFRAME)) {
                 style |= WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
                 style &= ~WS_POPUP;
                 SetWindowLongA(hw, GWL_STYLE, style);
-                SetWindowPos(hw, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                /* Adjust window size to keep 640x480 CLIENT area (add border/title space) */
+                RECT rc = {0, 0, 640, 480};
+                AdjustWindowRect(&rc, style, FALSE);
+                SetWindowPos(hw, 0, 50, 50, rc.right - rc.left, rc.bottom - rc.top,
+                    SWP_NOZORDER | SWP_FRAMECHANGED);
             }
             g_origWndProc = (WNDPROC)SetWindowLongA(hw, GWL_WNDPROC, (LONG)AspectWndProc);
             g_deviceHwnd = hw;
