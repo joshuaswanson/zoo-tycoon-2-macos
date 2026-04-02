@@ -13,3 +13,25 @@ disown
 sleep 3
 wine click_continue.exe 2>/dev/null &
 disown
+
+# Monitor macOS window size for D3D Present stretching
+(while pgrep -qf wine-preloader 2>/dev/null; do
+    swift -e '
+import CoreGraphics
+let o = CGWindowListOption(arrayLiteral: .optionOnScreenOnly)
+if let l = CGWindowListCopyWindowInfo(o, kCGNullWindowID) as? [[String: Any]] {
+    for w in l {
+        let n = w["kCGWindowName"] as? String ?? ""
+        let ow = w["kCGWindowOwnerName"] as? String ?? ""
+        let b = w["kCGWindowBounds"] as? [String: Any] ?? [:]
+        if ow.lowercased().contains("wine") && n.contains("Zoo Tycoon 2") && !n.contains("Error") && !n.contains("Warning") {
+            let w2 = b["Width"] as? Int ?? 0
+            let h = b["Height"] as? Int ?? 0
+            try? "\(w2) \(h - 28)".write(toFile: "/tmp/zt2_winsize", atomically: true, encoding: .utf8)
+            break
+        }
+    }
+}' 2>/dev/null
+    sleep 0.3
+done) &
+disown

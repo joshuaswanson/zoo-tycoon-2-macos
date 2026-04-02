@@ -528,6 +528,7 @@ static IDirect3DDevice9Vtbl g_hookedDevVtbl;
 static IDirect3DDevice9 *g_device = NULL;
 static HWND g_deviceHwnd = NULL;
 static UINT g_bbWidth = 0, g_bbHeight = 0;
+static UINT g_actualWinW = 0, g_actualWinH = 0; /* actual macOS window client size */
 static WNDPROC g_origWndProc = NULL;
 
 /* Window proc subclass to lock 4:3 aspect ratio during resize */
@@ -562,28 +563,53 @@ static LRESULT CALLBACK AspectWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return TRUE;
     }
-    if (msg == WM_SIZE && g_device) {
+    /* Enforce 4:3 via WM_WINDOWPOSCHANGING */
+    if (msg == WM_WINDOWPOSCHANGING && lp) {
+        WINDOWPOS *pos = (WINDOWPOS*)lp;
+        if (!(pos->flags & SWP_NOSIZE) && pos->cx > 0 && pos->cy > 0) {
+            LONG style = GetWindowLongA(hwnd, GWL_STYLE);
+            RECT borders = {0, 0, 0, 0};
+            AdjustWindowRect(&borders, style, FALSE);
+            LONG bw = borders.right - borders.left;
+            LONG bh = borders.bottom - borders.top;
+            LONG clientW = pos->cx - bw;
+            if (clientW > 0) {
+                LONG newClientH = (clientW * 3) / 4;
+                pos->cy = newClientH + bh;
+            }
+        }
+    }
+    /* Track actual window size from WM_WINDOWPOSCHANGED */
+    if (msg == WM_WINDOWPOSCHANGED && lp) {
+        WINDOWPOS *pos = (WINDOWPOS*)lp;
+        if (!(pos->flags & SWP_NOSIZE) && pos->cx > 0 && pos->cy > 0) {
+            LONG style = GetWindowLongA(hwnd, GWL_STYLE);
+            RECT borders = {0, 0, 0, 0};
+            AdjustWindowRect(&borders, style, FALSE);
+            g_actualWinW = pos->cx - (borders.right - borders.left);
+            g_actualWinH = pos->cy - (borders.bottom - borders.top);
+        }
+    }
+    /* After resize completes, force-correct to 4:3 */
+    if (msg == WM_SIZE) {
+        static int inCorrection = 0;
         UINT newW = LOWORD(lp);
         UINT newH = HIWORD(lp);
-        if (newW > 0 && newH > 0 && (newW != g_bbWidth || newH != g_bbHeight)) {
-            /* Try to Reset the device to the new size */
-            D3DPRESENT_PARAMETERS pp;
-            memset(&pp, 0, sizeof(pp));
-            pp.BackBufferWidth = newW;
-            pp.BackBufferHeight = newH;
-            pp.BackBufferFormat = D3DFMT_UNKNOWN;
-            pp.BackBufferCount = 1;
-            pp.SwapEffect = 1; /* D3DSWAPEFFECT_DISCARD */
-            pp.Windowed = TRUE;
-            pp.EnableAutoDepthStencil = TRUE;
-            pp.AutoDepthStencilFormat = 75; /* D3DFMT_D24S8 */
-            pp.PresentationInterval = 1;
-            {
-                HRESULT hr = g_origDevVtbl->Reset(g_device, &pp);
-                if (SUCCEEDED(hr)) {
-                    g_bbWidth = newW;
-                    g_bbHeight = newH;
-                }
+        if (!inCorrection && newW > 0 && newH > 0) {
+            UINT correctH = (newW * 3) / 4;
+            if (abs((int)newH - (int)correctH) > 4) {
+                RECT wr;
+                GetWindowRect(hwnd, &wr);
+                LONG style = GetWindowLongA(hwnd, GWL_STYLE);
+                RECT borders = {0, 0, 0, 0};
+                AdjustWindowRect(&borders, style, FALSE);
+                LONG bh = borders.bottom - borders.top;
+                LONG frameW = wr.right - wr.left;
+                LONG frameH = (LONG)correctH + bh;
+                inCorrection = 1;
+                SetWindowPos(hwnd, NULL, 0, 0, frameW, frameH,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                inCorrection = 0;
             }
         }
     }
@@ -591,6 +617,25 @@ static LRESULT CALLBACK AspectWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 }
 
 static HRESULT WINAPI Hooked_Present(IDirect3DDevice9 *dev, const RECT *src, const RECT *dst, HWND hwOver, const RGNDATA *rgn) {
+    { static int once=0; if(!once){once=1; DebugLog("Hooked_Present called!");} }
+    /* Read actual macOS window size from shared file (written by wine_aspect) */
+    {
+        static int macW = 0, macH = 0;
+        static int readCounter = 0;
+        /* Read file every 30 frames (~0.5s at 60fps) to avoid I/O overhead */
+        if (readCounter++ % 30 == 0) {
+            FILE *f = fopen("Z:\\tmp\\zt2_winsize", "r");
+            if (f) {
+                fscanf(f, "%d %d", &macW, &macH);
+                fclose(f);
+            }
+        }
+        if (macW > (int)g_bbWidth + 5 || macH > (int)g_bbHeight + 5) {
+            RECT srcRect = {0, 0, (LONG)g_bbWidth, (LONG)g_bbHeight};
+            RECT dstRect = {0, 0, (LONG)macW, (LONG)macH};
+            return g_origDevVtbl->Present(dev, &srcRect, &dstRect, hwOver, rgn);
+        }
+    }
     return g_origDevVtbl->Present(dev, src, dst, hwOver, rgn);
 }
 
@@ -731,10 +776,13 @@ static HRESULT WINAPI W_CreateDevice(IDirect3D9 *s, UINT a, D3DDEVTYPE dt, HWND 
             g_hookedDevVtbl.SetViewport = Hooked_SetViewport;
             g_hookedDevVtbl.SetScissorRect = Hooked_SetScissorRect;
             *(void**)device = &g_hookedDevVtbl;
-            /* Subclass window for smooth 4:3 aspect ratio locking */
-            if (hw) {
+            /* Subclass window for smooth 4:3 aspect ratio locking
+               (skip if early watcher already installed it) */
+            if (hw && !g_origWndProc) {
                 g_origWndProc = (WNDPROC)SetWindowLongA(hw, GWL_WNDPROC, (LONG)AspectWndProc);
                 DebugLog("  Subclassed window for 4:3 aspect lock + resize");
+            } else if (hw) {
+                DebugLog("  AspectWndProc already installed (early watcher)");
             }
         }
     }
@@ -2048,6 +2096,33 @@ static DWORD WINAPI EarlyPatchThread(LPVOID param) {
 /* From cds_hook.c */
 extern void InstallCDSHook(void);
 
+/* Early window watcher: finds game window and installs AspectWndProc
+   BEFORE D3D init, so intro videos get 4:3 aspect lock during resize */
+static DWORD WINAPI EarlyWindowWatcher(LPVOID param) {
+    int i;
+    (void)param;
+    for (i = 0; i < 300; i++) { /* 30 seconds */
+        HWND hw = FindWindowA(NULL, "Zoo Tycoon 2");
+        if (!hw) hw = FindWindowA(NULL, "Zoo Tycoon 2 Ultimate Collection");
+        if (hw && !g_origWndProc) {
+            /* Add resizable border + aspect lock */
+            LONG style = GetWindowLongA(hw, GWL_STYLE);
+            if (!(style & WS_THICKFRAME)) {
+                style |= WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
+                style &= ~WS_POPUP;
+                SetWindowLongA(hw, GWL_STYLE, style);
+                SetWindowPos(hw, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            }
+            g_origWndProc = (WNDPROC)SetWindowLongA(hw, GWL_WNDPROC, (LONG)AspectWndProc);
+            g_deviceHwnd = hw;
+            DebugLog("Early window watcher: installed AspectWndProc on game window");
+            break;
+        }
+        Sleep(100);
+    }
+    return 0;
+}
+
 BOOL WINAPI DllMain(HINSTANCE h, DWORD r, LPVOID p) {
     (void)p;
     if (r == DLL_PROCESS_ATTACH) {
@@ -2056,7 +2131,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD r, LPVOID p) {
         InstallCDSHook();
         DebugLog("ChangeDisplaySettings IAT hook installed");
         InstallCreateWindowExHook();
-        /* Early patch thread disabled - using dialog dismiss instead */
+        CreateThread(NULL, 0, EarlyWindowWatcher, NULL, 0, NULL);
     }
     if (r == DLL_PROCESS_DETACH && real_d3d9) {
         FreeLibrary(real_d3d9);
