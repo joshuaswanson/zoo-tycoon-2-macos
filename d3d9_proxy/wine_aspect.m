@@ -49,6 +49,86 @@ static void swz_setFrameFromWine(id self, SEL _cmd, NSRect contentRect) {
     orig_setFrameFromWine(self, _cmd, contentRect);
 }
 
+/* --- GL scaling via flushBuffer swizzle --- */
+typedef void (*FlushBufferIMP)(id, SEL);
+static FlushBufferIMP orig_flushBuffer = NULL;
+
+/* OpenGL function pointers (loaded dynamically) */
+typedef unsigned int GLenum;
+typedef int GLint;
+typedef void (*PFN_glGetIntegerv)(GLenum, GLint*);
+typedef void (*PFN_glBindFramebuffer)(GLenum, unsigned int);
+typedef void (*PFN_glBlitFramebuffer)(int,int,int,int,int,int,int,int,unsigned int,GLenum);
+typedef void (*PFN_glGenFramebuffers)(int, unsigned int*);
+typedef void (*PFN_glGenTextures)(int, unsigned int*);
+typedef void (*PFN_glBindTexture)(GLenum, unsigned int);
+typedef void (*PFN_glTexImage2D)(GLenum,int,int,int,int,int,GLenum,GLenum,const void*);
+typedef void (*PFN_glTexParameteri)(GLenum,GLenum,int);
+typedef void (*PFN_glFramebufferTexture2D)(GLenum,GLenum,GLenum,unsigned int,int);
+
+static PFN_glBlitFramebuffer p_glBlitFramebuffer = NULL;
+static PFN_glBindFramebuffer p_glBindFramebuffer = NULL;
+static PFN_glGetIntegerv p_glGetIntegerv = NULL;
+static int gl_loaded = 0;
+
+static void load_gl(void) {
+    extern void *dlsym(void*, const char*);
+    #define RTLD_DEFAULT ((void*)-2)
+    p_glBlitFramebuffer = (PFN_glBlitFramebuffer)dlsym(RTLD_DEFAULT, "glBlitFramebuffer");
+    p_glBindFramebuffer = (PFN_glBindFramebuffer)dlsym(RTLD_DEFAULT, "glBindFramebuffer");
+    p_glGetIntegerv = (PFN_glGetIntegerv)dlsym(RTLD_DEFAULT, "glGetIntegerv");
+    gl_loaded = 1;
+}
+
+static void swz_flushBuffer(id self, SEL _cmd) {
+    if (!gl_loaded) load_gl();
+
+    /* Read target size */
+    int targetW = 0, targetH = 0;
+    { FILE *f = fopen("/tmp/zt2_winsize", "r"); if (f) { fscanf(f, "%d %d", &targetW, &targetH); fclose(f); } }
+
+    if (p_glBlitFramebuffer && p_glBindFramebuffer && p_glGetIntegerv &&
+        targetW > 660 && targetH > 500) {
+        /* Use temp FBO to avoid read/write overlap on default framebuffer */
+        static unsigned int tFBO = 0, tTex = 0;
+        static int tW = 0, tH = 0;
+        PFN_glGenFramebuffers pGenFBO = (PFN_glGenFramebuffers)dlsym(RTLD_DEFAULT, "glGenFramebuffers");
+        PFN_glGenTextures pGenTex = (PFN_glGenTextures)dlsym(RTLD_DEFAULT, "glGenTextures");
+        PFN_glBindTexture pBindTex = (PFN_glBindTexture)dlsym(RTLD_DEFAULT, "glBindTexture");
+        PFN_glTexImage2D pTexImg = (PFN_glTexImage2D)dlsym(RTLD_DEFAULT, "glTexImage2D");
+        PFN_glTexParameteri pTexParam = (PFN_glTexParameteri)dlsym(RTLD_DEFAULT, "glTexParameteri");
+        PFN_glFramebufferTexture2D pFBTex = (PFN_glFramebufferTexture2D)dlsym(RTLD_DEFAULT, "glFramebufferTexture2D");
+
+        if (pGenFBO && pGenTex && pBindTex && pTexImg && pFBTex) {
+            if (!tFBO) { pGenFBO(1, &tFBO); pGenTex(1, &tTex); }
+            if (tW != 640 || tH != 480) {
+                pBindTex(0x0DE1/*GL_TEXTURE_2D*/, tTex);
+                pTexImg(0x0DE1, 0, 0x8058/*GL_RGBA8*/, 640, 480, 0, 0x1908/*GL_RGBA*/, 0x1401/*GL_UNSIGNED_BYTE*/, 0);
+                pTexParam(0x0DE1, 0x2801/*MIN_FILTER*/, 0x2601/*LINEAR*/);
+                pTexParam(0x0DE1, 0x2800/*MAG_FILTER*/, 0x2601/*LINEAR*/);
+                p_glBindFramebuffer(0x8D40/*GL_FRAMEBUFFER*/, tFBO);
+                pFBTex(0x8D40, 0x8CE0/*GL_COLOR_ATTACHMENT0*/, 0x0DE1, tTex, 0);
+                tW = 640; tH = 480;
+            }
+            GLint pR, pD;
+            p_glGetIntegerv(0x8CA8, &pR);
+            p_glGetIntegerv(0x8CA6, &pD);
+            /* Copy 640x480 from default FBO to temp */
+            p_glBindFramebuffer(0x8CA8, 0);
+            p_glBindFramebuffer(0x8CA9, tFBO);
+            p_glBlitFramebuffer(0, 0, 640, 480, 0, 0, 640, 480, 0x4000, 0x2600/*NEAREST*/);
+            /* Stretch temp to fill default FBO at window size */
+            p_glBindFramebuffer(0x8CA8, tFBO);
+            p_glBindFramebuffer(0x8CA9, 0);
+            p_glBlitFramebuffer(0, 0, 640, 480, 0, 0, targetW, targetH, 0x4000, 0x2601/*LINEAR*/);
+            p_glBindFramebuffer(0x8CA8, pR);
+            p_glBindFramebuffer(0x8CA9, pD);
+        }
+    }
+
+    orig_flushBuffer(self, _cmd);
+}
+
 /* --- Aspect thread --- */
 static int g_swizzled = 0;
 
@@ -73,6 +153,15 @@ static void *aspect_thread(void *arg) {
             if (m3) {
                 orig_setFrameFromWine = (SetFrameFromWineIMP)method_getImplementation(m3);
                 method_setImplementation(m3, (IMP)swz_setFrameFromWine);
+            }
+            /* Swizzle WineOpenGLContext.flushBuffer for GL scaling */
+            Class WineGLCtx = objc_getClass("WineOpenGLContext");
+            if (WineGLCtx) {
+                Method m4 = class_getInstanceMethod(WineGLCtx, sel_registerName("flushBuffer"));
+                if (m4) {
+                    orig_flushBuffer = (FlushBufferIMP)method_getImplementation(m4);
+                    method_setImplementation(m4, (IMP)swz_flushBuffer);
+                }
             }
             g_swizzled = 1;
         }
@@ -117,39 +206,30 @@ static void *aspect_thread(void *arg) {
             ((void(*)(id,SEL,NSSize))objc_msgSend)(win, sel_registerName("setContentMinSize:"), minSz);
             ((void(*)(id,SEL,NSSize))objc_msgSend)(win, sel_registerName("setContentMaxSize:"), maxSz);
 
-            /* Scale content via CALayer transform (keeps GL framebuffer at 640x480
-               but visually stretches it to fill the window) */
-            int targetW = 0, targetH = 0;
+            /* Resize subviews to expand GL framebuffer (flushBuffer does the scaling blit) */
             {
+                int targetW = 0, targetH = 0;
                 FILE *f = fopen("/tmp/zt2_winsize", "r");
                 if (f) { fscanf(f, "%d %d", &targetW, &targetH); fclose(f); }
-            }
-            if (targetW < 650 || targetH < 490) continue;
-
-            id contentView = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("contentView"));
-            if (!contentView) continue;
-            id subviews = ((id(*)(id,SEL))objc_msgSend)(contentView, sel_registerName("subviews"));
-            if (!subviews) continue;
-            unsigned long svCount = ((unsigned long(*)(id,SEL))objc_msgSend)(subviews, sel_registerName("count"));
-            unsigned long si;
-            for (si = 0; si < svCount; si++) {
-                id sv = ((id(*)(id,SEL,unsigned long))objc_msgSend)(subviews,
-                    sel_registerName("objectAtIndex:"), si);
-                id layer = ((id(*)(id,SEL))objc_msgSend)(sv, sel_registerName("layer"));
-                if (!layer) continue;
-                /* Scale from 640x480 to target size */
-                double sx = (double)targetW / 640.0;
-                double sy = (double)targetH / 480.0;
-                if (sx > 1.01 || sy > 1.01) {
-                    typedef struct { double m[16]; } CATransform3D;
-                    CATransform3D t = {{sx,0,0,0, 0,sy,0,0, 0,0,1,0, 0,0,0,1}};
-                    typedef struct { double x, y; } CGPoint;
-                    CGPoint anchor = {0, 0};
-                    ((void(*)(id,SEL,CGPoint))objc_msgSend)(layer, sel_registerName("setAnchorPoint:"), anchor);
-                    CGPoint pos = {0, 0};
-                    ((void(*)(id,SEL,CGPoint))objc_msgSend)(layer, sel_registerName("setPosition:"), pos);
-                    ((void(*)(id,SEL,CATransform3D))objc_msgSend)(layer, sel_registerName("setTransform:"), t);
-                    ((void(*)(id,SEL,BOOL))objc_msgSend)(layer, sel_registerName("setMasksToBounds:"), NO);
+                if (targetW > 650 && targetH > 490) {
+                    id contentView = ((id(*)(id,SEL))objc_msgSend)(win, sel_registerName("contentView"));
+                    if (contentView) {
+                        id subviews = ((id(*)(id,SEL))objc_msgSend)(contentView, sel_registerName("subviews"));
+                        if (subviews) {
+                            unsigned long svCount = ((unsigned long(*)(id,SEL))objc_msgSend)(subviews, sel_registerName("count"));
+                            unsigned long si;
+                            for (si = 0; si < svCount; si++) {
+                                id sv = ((id(*)(id,SEL,unsigned long))objc_msgSend)(subviews, sel_registerName("objectAtIndex:"), si);
+                                NSSize newSize = {(CGFloat)targetW, (CGFloat)targetH};
+                                struct objc_super sup;
+                                sup.receiver = sv;
+                                sup.super_class = class_getSuperclass(object_getClass(sv));
+                                ((void(*)(struct objc_super*, SEL, NSSize))objc_msgSendSuper)(&sup,
+                                    sel_registerName("setFrameSize:"), newSize);
+                            }
+                            ((void(*)(id,SEL))objc_msgSend)(win, sel_registerName("updateForGLSubviews"));
+                        }
+                    }
                 }
             }
         }
