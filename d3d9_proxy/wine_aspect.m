@@ -33,17 +33,18 @@ static void swz_adjustFeaturesForState(id self, SEL _cmd) {
 /* Block Wine from resetting window to 640x480 during/after resize */
 typedef void (*SetFrameFromWineIMP)(id, SEL, NSRect);
 static SetFrameFromWineIMP orig_setFrameFromWine = NULL;
+static int g_gameWindowSeen = 0;
+static int g_allowReset = 0; /* temporarily allow 640x480 reset from our own code */
 static void swz_setFrameFromWine(id self, SEL _cmd, NSRect contentRect) {
     id title = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("title"));
     if (title) {
         const char *t = ((const char*(*)(id,SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
         if (t && strstr(t, "Zoo Tycoon")) {
-            if (contentRect.size.width < 650 && contentRect.size.height < 490) {
-                int curW = 0, curH = 0;
-                FILE *f = fopen("/tmp/zt2_winsize", "r");
-                if (f) { fscanf(f, "%d %d", &curW, &curH); fclose(f); }
-                if (curW > 660) return;
+            /* After initial setup, always block Wine's 640x480 resets (unless we're doing our own reset) */
+            if (g_gameWindowSeen && !g_allowReset && contentRect.size.width < 650 && contentRect.size.height < 490) {
+                return;
             }
+            g_gameWindowSeen = 1;
         }
     }
     orig_setFrameFromWine(self, _cmd, contentRect);
@@ -83,15 +84,13 @@ static void load_gl(void) {
 static void swz_flushBuffer(id self, SEL _cmd) {
     if (!gl_loaded) load_gl();
 
-    /* Read target size */
     int targetW = 0, targetH = 0;
     { FILE *f = fopen("/tmp/zt2_winsize", "r"); if (f) { fscanf(f, "%d %d", &targetW, &targetH); fclose(f); } }
 
     if (p_glBlitFramebuffer && p_glBindFramebuffer && p_glGetIntegerv &&
         targetW > 660 && targetH > 500) {
-        /* Use temp FBO to avoid read/write overlap on default framebuffer */
+        /* Save game's 640x480 rendering to temp FBO before any context changes */
         static unsigned int tFBO = 0, tTex = 0;
-        static int tW = 0, tH = 0;
         PFN_glGenFramebuffers pGenFBO = (PFN_glGenFramebuffers)dlsym(RTLD_DEFAULT, "glGenFramebuffers");
         PFN_glGenTextures pGenTex = (PFN_glGenTextures)dlsym(RTLD_DEFAULT, "glGenTextures");
         PFN_glBindTexture pBindTex = (PFN_glBindTexture)dlsym(RTLD_DEFAULT, "glBindTexture");
@@ -100,33 +99,52 @@ static void swz_flushBuffer(id self, SEL _cmd) {
         PFN_glFramebufferTexture2D pFBTex = (PFN_glFramebufferTexture2D)dlsym(RTLD_DEFAULT, "glFramebufferTexture2D");
 
         if (pGenFBO && pGenTex && pBindTex && pTexImg && pFBTex) {
-            if (!tFBO) { pGenFBO(1, &tFBO); pGenTex(1, &tTex); }
-            if (tW != 640 || tH != 480) {
-                pBindTex(0x0DE1/*GL_TEXTURE_2D*/, tTex);
-                pTexImg(0x0DE1, 0, 0x8058/*GL_RGBA8*/, 640, 480, 0, 0x1908/*GL_RGBA*/, 0x1401/*GL_UNSIGNED_BYTE*/, 0);
-                pTexParam(0x0DE1, 0x2801/*MIN_FILTER*/, 0x2601/*LINEAR*/);
-                pTexParam(0x0DE1, 0x2800/*MAG_FILTER*/, 0x2601/*LINEAR*/);
-                p_glBindFramebuffer(0x8D40/*GL_FRAMEBUFFER*/, tFBO);
-                pFBTex(0x8D40, 0x8CE0/*GL_COLOR_ATTACHMENT0*/, 0x0DE1, tTex, 0);
-                tW = 640; tH = 480;
+            if (!tFBO) {
+                pGenFBO(1, &tFBO); pGenTex(1, &tTex);
+                pBindTex(0x0DE1, tTex);
+                pTexImg(0x0DE1, 0, 0x8058, 640, 480, 0, 0x1908, 0x1401, 0);
+                pTexParam(0x0DE1, 0x2801, 0x2601);
+                pTexParam(0x0DE1, 0x2800, 0x2601);
+                p_glBindFramebuffer(0x8D40, tFBO);
+                pFBTex(0x8D40, 0x8CE0, 0x0DE1, tTex, 0);
             }
             GLint pR, pD;
             p_glGetIntegerv(0x8CA8, &pR);
             p_glGetIntegerv(0x8CA6, &pD);
-            /* Copy 640x480 from default FBO to temp */
+
+            /* Step 1: Save game's 640x480 to temp FBO */
             p_glBindFramebuffer(0x8CA8, 0);
             p_glBindFramebuffer(0x8CA9, tFBO);
-            p_glBlitFramebuffer(0, 0, 640, 480, 0, 0, 640, 480, 0x4000, 0x2600/*NEAREST*/);
-            /* Stretch temp to fill default FBO at window size */
+            p_glBlitFramebuffer(0, 0, 640, 480, 0, 0, 640, 480, 0x4000, 0x2600);
+
+            /* Step 2: Stretch from temp to default FBO at target size.
+               The view resize + updateForGLSubviews expands the FBO over time. */
             p_glBindFramebuffer(0x8CA8, tFBO);
             p_glBindFramebuffer(0x8CA9, 0);
-            p_glBlitFramebuffer(0, 0, 640, 480, 0, 0, targetW, targetH, 0x4000, 0x2601/*LINEAR*/);
+            p_glBlitFramebuffer(0, 0, 640, 480, 0, 0, targetW, targetH, 0x4000, 0x2601);
+
             p_glBindFramebuffer(0x8CA8, pR);
             p_glBindFramebuffer(0x8CA9, pD);
         }
     }
 
     orig_flushBuffer(self, _cmd);
+}
+
+/* Block setFrame:display: from resetting to 640x480 */
+typedef void (*SetFrameDisplayIMP)(id, SEL, NSRect, BOOL);
+static SetFrameDisplayIMP orig_setFrameDisplay = NULL;
+static void swz_setFrameDisplay(id self, SEL _cmd, NSRect frame, BOOL flag) {
+    if (g_gameWindowSeen) {
+        id title = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("title"));
+        if (title) {
+            const char *t = ((const char*(*)(id,SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
+            if (t && strstr(t, "Zoo Tycoon") && frame.size.width < 650 && frame.size.height < 520 && !g_allowReset) {
+                return; /* Block reset to 640x480 */
+            }
+        }
+    }
+    orig_setFrameDisplay(self, _cmd, frame, flag);
 }
 
 /* --- Aspect thread --- */
@@ -148,6 +166,11 @@ static void *aspect_thread(void *arg) {
             if (m2) {
                 orig_adjustFeatures = (AdjustFeaturesIMP)method_getImplementation(m2);
                 method_setImplementation(m2, (IMP)swz_adjustFeaturesForState);
+            }
+            Method m3a = class_getInstanceMethod(WineWindow, sel_registerName("setFrame:display:"));
+            if (m3a) {
+                orig_setFrameDisplay = (SetFrameDisplayIMP)method_getImplementation(m3a);
+                method_setImplementation(m3a, (IMP)swz_setFrameDisplay);
             }
             Method m3 = class_getInstanceMethod(WineWindow, sel_registerName("setFrameFromWine:"));
             if (m3) {
@@ -183,20 +206,16 @@ static void *aspect_thread(void *arg) {
             /* Ensure resizable + aspect ratio + correct content size */
             NSSize ratio = {4.0, 3.0};
             ((void(*)(id,SEL,NSSize))objc_msgSend)(win, sel_registerName("setContentAspectRatio:"), ratio);
-            /* If the content area is < 640x480 (title bar eating space), enlarge once */
+            /* Reset to 640x480 content on first launch */
             {
-                static int enlarged = 0;
-                if (!enlarged) {
-                    int curW = 0, curH = 0;
-                    FILE *f = fopen("/tmp/zt2_winsize", "r");
-                    if (f) { fscanf(f, "%d %d", &curW, &curH); fclose(f); }
-                    if (curW > 0 && curW <= 640 && curH < 480) {
-                        /* Content is smaller than 640x480 - enlarge to compensate for title bar */
-                        NSSize newContentSize = {640, 480};
-                        ((void(*)(id,SEL,NSSize))objc_msgSend)(win,
-                            sel_registerName("setContentSize:"), newContentSize);
-                        enlarged = 1;
-                    }
+                static int resetDone = 0;
+                if (!resetDone) {
+                    g_allowReset = 1;
+                    NSSize newContentSize = {640, 480};
+                    ((void(*)(id,SEL,NSSize))objc_msgSend)(win,
+                        sel_registerName("setContentSize:"), newContentSize);
+                    g_allowReset = 0;
+                    resetDone = 1;
                 }
             }
             unsigned long mask = ((unsigned long(*)(id,SEL))objc_msgSend)(win, sel_registerName("styleMask"));
@@ -206,7 +225,7 @@ static void *aspect_thread(void *arg) {
             ((void(*)(id,SEL,NSSize))objc_msgSend)(win, sel_registerName("setContentMinSize:"), minSz);
             ((void(*)(id,SEL,NSSize))objc_msgSend)(win, sel_registerName("setContentMaxSize:"), maxSz);
 
-            /* Resize subviews to expand GL framebuffer (flushBuffer does the scaling blit) */
+            /* Resize subviews to expand GL surface (flushBuffer handles the blit) */
             {
                 int targetW = 0, targetH = 0;
                 FILE *f = fopen("/tmp/zt2_winsize", "r");
@@ -227,8 +246,9 @@ static void *aspect_thread(void *arg) {
                                 ((void(*)(struct objc_super*, SEL, NSSize))objc_msgSendSuper)(&sup,
                                     sel_registerName("setFrameSize:"), newSize);
                             }
-                            ((void(*)(id,SEL))objc_msgSend)(win, sel_registerName("updateForGLSubviews"));
                         }
+                        /* Tell GL contexts the view changed */
+                        ((void(*)(id,SEL))objc_msgSend)(win, sel_registerName("updateForGLSubviews"));
                     }
                 }
             }
