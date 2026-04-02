@@ -38,11 +38,24 @@ static NSSize swz_windowWillResize(id self, SEL _cmd, id sender, NSSize frameSiz
 /* Block Wine's setFrameFromWine 640x480 resets when user has resized */
 typedef void (*SetFrameFromWineIMP)(id, SEL, NSRect);
 static SetFrameFromWineIMP orig_setFrameFromWine = NULL;
+static unsigned long g_lastResizeTime = 0;
 static void swz_setFrameFromWine(id self, SEL _cmd, NSRect contentRect) {
     if (contentRect.size.width < 650 && contentRect.size.height < 490) {
-        /* During live resize or when window is larger, block the 640x480 reset */
         BOOL inResize = ((BOOL(*)(id,SEL))objc_msgSend)(self, sel_registerName("inLiveResize"));
-        if (inResize) return;
+
+        /* Get current time */
+        unsigned long now = (unsigned long)((double(*)(id,SEL))objc_msgSend)(
+            ((id(*)(id,SEL))objc_msgSend)((id)objc_getClass("NSProcessInfo"),
+                sel_registerName("processInfo")),
+            sel_registerName("systemUptime"));
+
+        if (inResize) {
+            g_lastResizeTime = now;
+            return; /* Block during drag */
+        }
+
+        /* Block for 10 seconds after last drag to let resize_sync.exe catch up */
+        if (now - g_lastResizeTime < 10) return;
 
         /* Also check size file */
         int curW = 0, curH = 0;
@@ -54,6 +67,26 @@ static void swz_setFrameFromWine(id self, SEL _cmd, NSRect contentRect) {
         }
     }
     orig_setFrameFromWine(self, _cmd, contentRect);
+}
+
+/* Block setFrame:display: snap-back too */
+typedef void (*SetFrameDisplayIMP)(id, SEL, NSRect, BOOL);
+static SetFrameDisplayIMP orig_setFrameDisplay = NULL;
+static void swz_setFrameDisplay(id self, SEL _cmd, NSRect frame, BOOL flag) {
+    if (frame.size.width < 650 && frame.size.height < 520) {
+        BOOL inResize = ((BOOL(*)(id,SEL))objc_msgSend)(self, sel_registerName("inLiveResize"));
+        unsigned long now = (unsigned long)((double(*)(id,SEL))objc_msgSend)(
+            ((id(*)(id,SEL))objc_msgSend)((id)objc_getClass("NSProcessInfo"),
+                sel_registerName("processInfo")),
+            sel_registerName("systemUptime"));
+        if (inResize) { g_lastResizeTime = now; return; }
+        if (now - g_lastResizeTime < 10) return;
+        int curW = 0;
+        FILE *f = fopen("/tmp/zt2_winsize", "r");
+        if (f) { fscanf(f, "%d", &curW); fclose(f); }
+        if (curW > 660) return;
+    }
+    orig_setFrameDisplay(self, _cmd, frame, flag);
 }
 
 static int g_swizzled = 0;
@@ -73,6 +106,8 @@ static void *aspect_thread(void *arg) {
             if (m) { orig_adjustFeatures = (AdjustFeaturesIMP)method_getImplementation(m); method_setImplementation(m, (IMP)swz_adjustFeaturesForState); }
             m = class_getInstanceMethod(WineWindow, sel_registerName("windowWillResize:toSize:"));
             if (m) { orig_windowWillResize = (WindowWillResizeIMP)method_getImplementation(m); method_setImplementation(m, (IMP)swz_windowWillResize); }
+            m = class_getInstanceMethod(WineWindow, sel_registerName("setFrame:display:"));
+            if (m) { orig_setFrameDisplay = (SetFrameDisplayIMP)method_getImplementation(m); method_setImplementation(m, (IMP)swz_setFrameDisplay); }
             m = class_getInstanceMethod(WineWindow, sel_registerName("setFrameFromWine:"));
             if (m) { orig_setFrameFromWine = (SetFrameFromWineIMP)method_getImplementation(m); method_setImplementation(m, (IMP)swz_setFrameFromWine); }
             g_swizzled = 1;

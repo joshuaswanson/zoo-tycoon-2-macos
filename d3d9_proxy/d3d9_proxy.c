@@ -635,27 +635,11 @@ static LRESULT CALLBACK AspectWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
         }
     }
-    /* Block Wine's 640x480 snap-back from Win32 side */
-    if (msg == WM_WINDOWPOSCHANGING && lp) {
-        WINDOWPOS *pos = (WINDOWPOS*)lp;
-        if (!(pos->flags & SWP_NOSIZE) && pos->cx > 0 && pos->cy > 0 && pos->cx < 660) {
-            int curW = 0;
-            char sizePath[MAX_PATH];
-            strcpy(sizePath, g_dllDir);
-            strcat(sizePath, "zt2_winsize.txt");
-            FILE *f = fopen(sizePath, "r");
-            if (!f) { f = fopen("Z:\\tmp\\zt2_winsize", "r"); }
-            if (f) { fscanf(f, "%d", &curW); fclose(f); }
-            if (curW > 660) {
-                pos->flags |= SWP_NOSIZE; /* Block the size change */
-            }
-        }
-    }
-    /* Reset D3D backbuffer when macOS window is larger than backbuffer */
-    if (msg == WM_SIZE && g_device && g_origDevVtbl) {
-        /* Read actual macOS size from file (Wine's WM_SIZE lp reports 640x480) */
-        UINT newW = 0, newH = 0;
-        { FILE *f = fopen("Z:\\tmp\\zt2_winsize", "r"); if (f) { fscanf(f, "%u %u", &newW, &newH); fclose(f); } }
+    /* WM_WINDOWPOSCHANGING blocking removed - was interfering with SetWindowPos */
+    /* Handle custom resize message from resize_sync.exe */
+    #define WM_ZT_RESIZE (WM_USER + 100)
+    if (msg == WM_ZT_RESIZE && g_device && g_origDevVtbl) {
+        UINT newW = (UINT)wp, newH = (UINT)lp;
         if (newW > 660 && newH > 500 && (newW != g_bbWidth || newH != g_bbHeight)) {
             D3DPRESENT_PARAMETERS pp;
             memset(&pp, 0, sizeof(pp));
@@ -2213,8 +2197,12 @@ static DWORD WINAPI EarlyWindowWatcher(LPVOID param) {
             g_origWndProc = (WNDPROC)SetWindowLongA(hw, GWL_WNDPROC, (LONG)AspectWndProc);
             g_deviceHwnd = hw;
             DebugLog("Early window watcher: installed AspectWndProc on game window");
-            /* Start a timer for resize sync (can't create threads from Wine context) */
-            SetTimer(hw, 42, 200, NULL); /* Timer ID 42, 200ms interval */
+            /* Force window size again after installing wndproc */
+            {
+                RECT rc2 = {0, 0, 640, 480};
+                AdjustWindowRect(&rc2, style, FALSE);
+                SetWindowPos(hw, 0, 50, 50, rc2.right-rc2.left, rc2.bottom-rc2.top, SWP_NOZORDER);
+            }
             break;
         }
         Sleep(100);
