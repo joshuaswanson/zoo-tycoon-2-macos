@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <string.h>
+#include <stdio.h>
 
 /* Real D3D9 */
 typedef IDirect3D9* (WINAPI *PFN_Direct3DCreate9)(UINT SDKVersion);
@@ -1103,6 +1104,7 @@ __declspec(dllexport) IDirect3D9* WINAPI Direct3DCreate9(UINT SDKVersion) {
                     "error:init_video_card_info_failed",
                     "error:enumerate_adapter_modes_failed",
                     "error:slow_processor",
+                    "error:renderer_create_failed",
                     NULL
                 };
                 /* NOTE: "error:low_video_memory" and "error:low_system_memory" are NOT
@@ -1191,6 +1193,27 @@ __declspec(dllexport) IDirect3D9* WINAPI Direct3DCreate9(UINT SDKVersion) {
                     }
                 }
                 DebugLog("Error string scanner complete");
+
+                /* Hardcoded patch for renderer_create_failed at 00799718.
+                   The scanner can't find this because the Jcc is a 0F 84 (JZ rel32)
+                   that was already partially matched by the short-Jcc scan and skipped.
+                   Address 00799718 has bytes: 0F 84 XX XX XX XX (JZ to error handler).
+                   Patch to: 90 E9 XX XX XX XX (NOP + JMP = always skip error). */
+                {
+                    BYTE *target = base + (0x00799718 - 0x400000);
+                    if (target[0] == 0x0F && (target[1] == 0x84 || target[1] == 0x85)) {
+                        DWORD oldProt;
+                        VirtualProtect(target, 2, PAGE_EXECUTE_READWRITE, &oldProt);
+                        target[0] = 0x90; /* NOP */
+                        target[1] = 0xE9; /* JMP rel32 (reuses existing offset) */
+                        VirtualProtect(target, 2, oldProt, &oldProt);
+                        DebugLog("HARDCODED PATCH: renderer_create_failed Jcc at 00799718 -> NOP+JMP");
+                    } else {
+                        char hb[128];
+                        wsprintfA(hb, "HARDCODED PATCH SKIP: bytes at 00799718 = %02X %02X (expected 0F 84/85)", target[0], target[1]);
+                        DebugLog(hb);
+                    }
+                }
             }
 
                 /* Factory range scan DISABLED - breaks control flow */
@@ -2218,7 +2241,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD r, LPVOID p) {
         InstallCDSHook();
         DebugLog("ChangeDisplaySettings IAT hook installed");
         InstallCreateWindowExHook();
-        CreateThread(NULL, 0, EarlyWindowWatcher, NULL, 0, NULL);
+        CreateThread(NULL, 0, EarlyPatchThread, NULL, 0, NULL);
         /* ResizeSyncThread is started from EarlyWindowWatcher after finding the game window */
     }
     if (r == DLL_PROCESS_DETACH && real_d3d9) {

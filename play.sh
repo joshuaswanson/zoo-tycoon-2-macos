@@ -4,6 +4,7 @@
 
 GAME_DIR="$(cd "$(dirname "$0")/Game Files" && pwd)"
 export WINEPREFIX="$HOME/ZooTycoon2"
+export WINEDLLOVERRIDES="d3d9=n"
 
 cd "$GAME_DIR"
 wine zt.exe "$@" 2>/dev/null &
