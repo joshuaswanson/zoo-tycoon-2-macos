@@ -1,5 +1,5 @@
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index b433838..06f4e63 100644
+index b433838..19f1881 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
 @@ -1552,6 +1552,38 @@ - (void) handleMouseMove:(NSEvent*)anEvent
@@ -12,7 +12,7 @@ index b433838..06f4e63 100644
 +                   what Wine's coordinate system expects. */
 +                if (macdrv_scaling_active && targetWindow &&
 +                    [targetWindow isKindOfClass:[WineWindow class]] &&
-+                    g_scaleFactor > 1.01f) {
++                    0 /* disabled - mouse.c handles scaling */) {
 +                    NSRect macFrame = targetWindow.frame;
 +                    NSRect wineFrame = [(WineWindow*)targetWindow wine_fractionalFrame];
 +                    CGFloat screenH = [self primaryScreenHeight];
@@ -48,7 +48,7 @@ index b433838..06f4e63 100644
 +                /* Scale cursor for Zoo Tycoon 2 window scaling */
 +                if (macdrv_scaling_active && window &&
 +                    [window isKindOfClass:[WineWindow class]] &&
-+                    g_scaleFactor > 1.01f) {
++                    0 /* disabled - mouse.c handles scaling */) {
 +                    NSRect macFrame = window.frame;
 +                    NSRect wineFrame = [(WineWindow*)window wine_fractionalFrame];
 +                    CGFloat screenH = [self primaryScreenHeight];
@@ -77,7 +77,7 @@ index b433838..06f4e63 100644
 +        CGPoint cgpos = NSPointToCGPoint(location);
 +
 +        /* Scale for Zoo Tycoon 2 window scaling */
-+        if (macdrv_scaling_active && g_scaleFactor > 1.01f) {
++        if (macdrv_scaling_active && 0 /* disabled - mouse.c handles scaling */) {
 +            WineApplicationController* controller = [WineApplicationController sharedController];
 +            CGFloat screenH = [controller primaryScreenHeight];
 +            for (NSWindow* win in [NSApp windows]) {
@@ -381,7 +381,7 @@ index ec2a292..4ffd557 100644
          {
              if (maximized)
 diff --git a/dlls/winemac.drv/mouse.c b/dlls/winemac.drv/mouse.c
-index 724503f..27eac98 100644
+index 724503f..b4ec1d8 100644
 --- a/dlls/winemac.drv/mouse.c
 +++ b/dlls/winemac.drv/mouse.c
 @@ -32,6 +32,9 @@
@@ -394,23 +394,34 @@ index 724503f..27eac98 100644
  
  static pthread_mutex_t cursor_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
  static CFMutableDictionaryRef cursor_cache;
-@@ -134,6 +137,22 @@ static void send_mouse_input(HWND hwnd, macdrv_window cocoa_window, UINT flags,
+@@ -134,6 +137,33 @@ static void send_mouse_input(HWND hwnd, macdrv_window cocoa_window, UINT flags,
  
      top_level_hwnd = NtUserGetAncestor(hwnd, GA_ROOT);
  
 +    /* Scale mouse coordinates for Zoo Tycoon 2 window scaling.
-+       The macOS window is larger than 640x480, but the game expects 640x480 coords.
-+       g_actualContentWidth/Height are set by cocoa_window.m windowDidResize. */
++       x,y are in Win32 screen space (CG points * 2 on Retina).
++       g_actualContentWidth/Height are CONTENT size in CG points.
++       NtUserGetWindowRect returns the Wine WINDOW rect in Win32 space.
++       Scale content area only (title bar pixels are not scaled). */
 +    if ((flags & MOUSEEVENTF_ABSOLUTE) && top_level_hwnd &&
 +        g_actualContentWidth > 650 && g_actualContentHeight > 490)
 +    {
 +        RECT wr;
 +        if (NtUserGetWindowRect(top_level_hwnd, &wr))
 +        {
-+            int relX = x - wr.left;
-+            int relY = y - wr.top;
-+            x = wr.left + relX * 640 / g_actualContentWidth;
-+            y = wr.top + relY * 480 / g_actualContentHeight;
++            int rs = retina_on ? 2 : 1;
++            int wineW = wr.right - wr.left;
++            int wineH = wr.bottom - wr.top;
++            int wineContentH = 480 * rs;
++            int titleH = wineH - wineContentH;
++            int actualContentW = g_actualContentWidth * rs;
++            int actualContentH = g_actualContentHeight * rs;
++            if (actualContentW > wineW + 10) {
++                int relX = x - wr.left;
++                int relY = y - wr.top - titleH;
++                x = wr.left + relX * wineW / actualContentW;
++                y = wr.top + titleH + relY * wineContentH / actualContentH;
++            }
 +        }
 +    }
 +
