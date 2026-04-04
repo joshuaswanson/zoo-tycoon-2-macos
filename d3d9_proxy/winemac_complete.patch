@@ -1,5 +1,5 @@
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index b433838..19f1881 100644
+index b433838..cf1d873 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
 @@ -1552,6 +1552,38 @@ - (void) handleMouseMove:(NSEvent*)anEvent
@@ -69,41 +69,45 @@ index b433838..19f1881 100644
                  pt = cgpoint_win_from_mac(pt);
  
                  event = macdrv_create_event(MOUSE_BUTTON, window);
-@@ -2758,7 +2811,36 @@ int macdrv_get_cursor_position(CGPoint *pos)
+@@ -2758,7 +2811,40 @@ int macdrv_get_cursor_position(CGPoint *pos)
      OnMainThread(^{
          NSPoint location = [NSEvent mouseLocation];
          location = [[WineApplicationController sharedController] flippedMouseLocation:location];
 -        *pos = cgpoint_win_from_mac(NSPointToCGPoint(location));
 +        CGPoint cgpos = NSPointToCGPoint(location);
 +
-+        /* Scale for Zoo Tycoon 2 window scaling */
-+        if (macdrv_scaling_active && 0 /* disabled - mouse.c handles scaling */) {
-+            WineApplicationController* controller = [WineApplicationController sharedController];
-+            CGFloat screenH = [controller primaryScreenHeight];
++        /* Scale for Zoo Tycoon 2 window scaling (cursor position polling).
++           Must match the formula in mouse.c send_mouse_input exactly.
++           Scale AFTER cgpoint_win_from_mac so we're in Win32 space. */
++        *pos = cgpoint_win_from_mac(cgpos);
++        if (macdrv_scaling_active && g_actualContentWidth > 650 && g_actualContentHeight > 490) {
 +            for (NSWindow* win in [NSApp windows]) {
 +                if ([win isKindOfClass:[WineWindow class]] &&
 +                    [[win title] containsString:@"Zoo Tycoon 2"] &&
 +                    [[win title] length] < 20) {
-+                    NSRect macFrame = win.frame;
 +                    NSRect wineFrame = [(WineWindow*)win wine_fractionalFrame];
-+                    CGFloat macLeft = macFrame.origin.x;
-+                    CGFloat macTop = screenH - macFrame.origin.y - macFrame.size.height;
-+                    NSRect macContent = [win contentRectForFrameRect:macFrame];
-+                    CGFloat macContentTop = macTop + (macFrame.size.height - macContent.size.height);
-+                    CGFloat wineLeft = wineFrame.origin.x;
-+                    CGFloat wineTop = screenH - wineFrame.origin.y - wineFrame.size.height;
-+                    NSRect wineContent = [win contentRectForFrameRect:wineFrame];
-+                    CGFloat wineContentTop = wineTop + (wineFrame.size.height - wineContent.size.height);
-+                    CGFloat gameX = (cgpos.x - macLeft - g_scaleOffsetX) / g_scaleFactor;
-+                    CGFloat gameY = (cgpos.y - macContentTop - g_scaleOffsetY) / g_scaleFactor;
-+                    cgpos.x = wineLeft + gameX;
-+                    cgpos.y = wineTop + gameY;
++                    int rs = retina_on ? 2 : 1;
++                    int wineW = (int)(wineFrame.size.width * rs);
++                    /* Estimate wine content height: view is 640x480 */
++                    int wineContentH = 480 * rs;
++                    int titleH = (int)(wineFrame.size.height * rs) - wineContentH;
++                    int actualContentW = g_actualContentWidth * rs;
++                    int actualContentH = g_actualContentHeight * rs;
++                    int wineLeft = (int)(wineFrame.origin.x * rs);
++                    /* CG top in Win32 */
++                    WineApplicationController* ctrl = [WineApplicationController sharedController];
++                    CGFloat screenH = [ctrl primaryScreenHeight];
++                    int wineTop = (int)((screenH - wineFrame.origin.y - wineFrame.size.height) * rs);
++                    int relX = (int)pos->x - wineLeft; /* NOT wr.left, but same value */
++                    int relY = (int)pos->y - wineTop - titleH;
++                    pos->x = wineLeft + relX * wineW / actualContentW;
++                    pos->y = wineTop + titleH + relY * wineContentH / actualContentH;
 +                    break;
 +                }
 +            }
++        } else {
++            *pos = cgpoint_win_from_mac(cgpos);
 +        }
-+
-+        *pos = cgpoint_win_from_mac(cgpos);
      });
  
      return TRUE;
