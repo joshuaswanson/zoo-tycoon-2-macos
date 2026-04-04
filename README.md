@@ -1,8 +1,8 @@
 # Zoo Tycoon 2 Ultimate Collection on macOS
 
-Play Zoo Tycoon 2 Ultimate Collection on your Mac — including Apple Silicon Macs (M1, M2, M3, M4).
+Play Zoo Tycoon 2 Ultimate Collection on your Mac, including Apple Silicon Macs (M1, M2, M3, M4).
 
-The game runs in a resizable window with 4:3 aspect ratio. Drag the window edges to make it as big or small as you want — the game scales to fit. All expansion packs included.
+The game runs in a resizable window with 4:3 aspect ratio. Drag the window edges to make it as big or small as you want and the game scales to fit.
 
 ## Quick start
 
@@ -39,11 +39,11 @@ Then put your Zoo Tycoon 2 game files in the `Game Files/` folder and run:
 ## What you get
 
 - Runs natively on Apple Silicon (M1/M2/M3/M4) and Intel Macs
-- Resizable window — drag to any size, game scales to fill
+- Resizable window that scales the game to fill
 - 4:3 aspect ratio locked so nothing stretches weird
 - All intro videos, menus, and gameplay work
-- All DLC and expansion packs supported
-- No need to mess with Wine settings — the launch script handles everything
+- Works with all DLC and expansion packs
+- No need to mess with Wine settings, the launch script handles everything
 
 ## Requirements
 
@@ -89,6 +89,7 @@ The game renders at 640x480 internally. A patch to Wine's `winemac.drv` handles 
 
 - WineContentView pinned to 640x480 (GL framebuffer stays at game resolution)
 - CATransform3D on the view's layer scales content to fill the window
+- Uniform scaling with centering to maintain aspect ratio in fullscreen
 - contentsGravity=kCAGravityResize for 2D surface content (intro videos)
 - windowWillResize enforces 4:3 aspect ratio with 640x480 minimum
 - setFrame:display: blocks Wine's programmatic shrinks
@@ -110,7 +111,7 @@ ZT.exe
 
 ### Why this is hard
 
-The game uses the Gamebryo (NetImmerse) engine with a `NiDX9Renderer` class that validates GPU capabilities at startup. It calls GetAdapterIdentifier, GetDeviceCaps, and EnumAdapterModes, then checks results against an internal format table. Anything unexpected = refused to start.
+The game uses the Gamebryo (NetImmerse) engine with a `NiDX9Renderer` class that validates GPU capabilities at startup. It calls GetAdapterIdentifier, GetDeviceCaps, and EnumAdapterModes, then checks results against an internal format table. Anything unexpected and it refuses to start.
 
 The executable is SafeDisc protected (encrypted code sections `stxt774`, `stxt371`). Binary patches must be applied after runtime decryption from inside a loaded DLL.
 
