@@ -1,0 +1,385 @@
+diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
+index b433838..dc8b304 100644
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -1552,6 +1552,24 @@ - (void) handleMouseMove:(NSEvent*)anEvent
+                     point.y -= rect.origin.y;
+                 }
+ 
++                /* Scale cursor for Zoo Tycoon 2 window scaling */
++                if (macdrv_scaling_active && targetWindow &&
++                    g_actualContentWidth > 650 && g_actualContentHeight > 490) {
++                    NSRect winFrame = targetWindow.frame;
++                    CGFloat screenH = [self primaryScreenHeight];
++                    CGFloat winLeft = winFrame.origin.x;
++                    CGFloat winTop = screenH - winFrame.origin.y - winFrame.size.height;
++                    NSRect contentRect = [targetWindow contentRectForFrameRect:winFrame];
++                    CGFloat titleH = winFrame.size.height - contentRect.size.height;
++                    CGFloat contentTop = winTop + titleH;
++                    CGFloat relX = point.x - winLeft;
++                    CGFloat relY = point.y - contentTop;
++                    relX = relX * 640.0 / g_actualContentWidth;
++                    relY = relY * 480.0 / g_actualContentHeight;
++                    point.x = winLeft + relX;
++                    point.y = contentTop + relY;
++                }
++
+                 point = cgpoint_win_from_mac(point);
+ 
+                 event = macdrv_create_event(MOUSE_MOVED_ABSOLUTE, targetWindow);
+@@ -1706,6 +1724,24 @@ - (void) handleMouseButton:(NSEvent*)theEvent
+                     pt.y -= rect.origin.y;
+                 }
+ 
++                /* Scale cursor for Zoo Tycoon 2 window scaling */
++                if (macdrv_scaling_active && window &&
++                    g_actualContentWidth > 650 && g_actualContentHeight > 490) {
++                    NSRect winFrame = window.frame;
++                    CGFloat screenH = [self primaryScreenHeight];
++                    CGFloat winLeft = winFrame.origin.x;
++                    CGFloat winTop = screenH - winFrame.origin.y - winFrame.size.height;
++                    NSRect contentRect = [window contentRectForFrameRect:winFrame];
++                    CGFloat titleH = winFrame.size.height - contentRect.size.height;
++                    CGFloat contentTop = winTop + titleH;
++                    CGFloat relX = pt.x - winLeft;
++                    CGFloat relY = pt.y - contentTop;
++                    relX = relX * 640.0 / g_actualContentWidth;
++                    relY = relY * 480.0 / g_actualContentHeight;
++                    pt.x = winLeft + relX;
++                    pt.y = contentTop + relY;
++                }
++
+                 pt = cgpoint_win_from_mac(pt);
+ 
+                 event = macdrv_create_event(MOUSE_BUTTON, window);
+@@ -2758,7 +2794,35 @@ int macdrv_get_cursor_position(CGPoint *pos)
+     OnMainThread(^{
+         NSPoint location = [NSEvent mouseLocation];
+         location = [[WineApplicationController sharedController] flippedMouseLocation:location];
+-        *pos = cgpoint_win_from_mac(NSPointToCGPoint(location));
++        CGPoint cgpos = NSPointToCGPoint(location);
++
++        /* Scale for Zoo Tycoon 2 window scaling */
++        if (macdrv_scaling_active && g_actualContentWidth > 650 && g_actualContentHeight > 490) {
++            WineApplicationController* controller = [WineApplicationController sharedController];
++            CGFloat screenH = [controller primaryScreenHeight];
++            /* Find the Zoo Tycoon 2 window */
++            for (NSWindow* win in [NSApp windows]) {
++                if ([win isKindOfClass:[WineWindow class]] &&
++                    [[win title] containsString:@"Zoo Tycoon 2"] &&
++                    [[win title] length] < 20) {
++                    NSRect winFrame = win.frame;
++                    CGFloat winLeft = winFrame.origin.x;
++                    CGFloat winTop = screenH - winFrame.origin.y - winFrame.size.height;
++                    NSRect contentRect = [win contentRectForFrameRect:winFrame];
++                    CGFloat titleH = winFrame.size.height - contentRect.size.height;
++                    CGFloat contentTop = winTop + titleH;
++                    CGFloat relX = cgpos.x - winLeft;
++                    CGFloat relY = cgpos.y - contentTop;
++                    relX = relX * 640.0 / g_actualContentWidth;
++                    relY = relY * 480.0 / g_actualContentHeight;
++                    cgpos.x = winLeft + relX;
++                    cgpos.y = contentTop + relY;
++                    break;
++                }
++            }
++        }
++
++        *pos = cgpoint_win_from_mac(cgpos);
+     });
+ 
+     return TRUE;
+diff --git a/dlls/winemac.drv/cocoa_opengl.m b/dlls/winemac.drv/cocoa_opengl.m
+index ce8788b..9daf709 100644
+--- a/dlls/winemac.drv/cocoa_opengl.m
++++ b/dlls/winemac.drv/cocoa_opengl.m
+@@ -21,10 +21,12 @@
+ #define GL_SILENCE_DEPRECATION
+ #include <OpenGL/gl.h>
+ #import "cocoa_opengl.h"
++#import "cocoa_window.h"
+ 
+ #include "macdrv_cocoa.h"
+ #include "cocoa_app.h"
+ #include "cocoa_event.h"
++#import <QuartzCore/QuartzCore.h>
+ 
+ 
+ @interface WineOpenGLContext ()
+@@ -366,6 +368,7 @@ void macdrv_update_opengl_context(macdrv_opengl_context c)
+             });
+             [context resetSurfaceIfBackingSizeChanged];
+         }
++
+     }
+ 
+     [pool release];
+@@ -385,5 +388,21 @@ void macdrv_flush_opengl_context(macdrv_opengl_context c)
+     macdrv_update_opengl_context(c);
+     [context flushBuffer];
+ 
++    /* Zoo Tycoon 2: pin view to 640x480 after flush to keep GL framebuffer
++       at game resolution. The view gets auto-resized by the window, so we
++       reset it here on every frame. The layer transform in windowDidResize
++       handles the visual scaling. */
++    if (macdrv_scaling_active) {
++        NSView* view = [context view];
++        if (view && (fabs(view.frame.size.width - 640) > 2 || fabs(view.frame.size.height - 480) > 2)) {
++            NSWindow* win = [view window];
++            if (win && [[win title] containsString:@"Zoo Tycoon 2"] && [[win title] length] < 20) {
++                dispatch_async(dispatch_get_main_queue(), ^{
++                    [view setFrameSize:NSMakeSize(640, 480)];
++                });
++            }
++        }
++    }
++
+     [pool release];
+ }
+diff --git a/dlls/winemac.drv/cocoa_window.h b/dlls/winemac.drv/cocoa_window.h
+index a83f2aa..22896c5 100644
+--- a/dlls/winemac.drv/cocoa_window.h
++++ b/dlls/winemac.drv/cocoa_window.h
+@@ -111,3 +111,9 @@ - (void) updateForCursorClipping;
+     - (void) setRetinaMode:(int)mode;
+ 
+ @end
++
++extern BOOL macdrv_scaling_active;
++extern NSSize g_lastLargeSize;
++extern BOOL g_forceExpand;
++extern int g_actualContentWidth;
++extern int g_actualContentHeight;
+diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
+index ec2a292..11302b6 100644
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -480,6 +480,12 @@ - (NSFocusRingType) focusRingType
+ @end
+ 
+ 
++BOOL macdrv_scaling_active = TRUE;
++NSSize g_lastLargeSize = {0, 0};
++BOOL g_forceExpand = FALSE;
++int g_actualContentWidth = 640;
++int g_actualContentHeight = 480;
++
+ @implementation WineContentView
+ 
+ @synthesize everHadGLContext = _everHadGLContext;
+@@ -496,6 +502,28 @@ - (instancetype) initWithFrame:(NSRect)frame
+         return self;
+     }
+ 
++    - (void) updateTrackingAreas
++    {
++        [super updateTrackingAreas];
++        /* When the view is pinned to 640x480 but the window is larger,
++           expand tracking areas to cover the full window content area
++           so mouse events aren't lost outside the view bounds. */
++        if (macdrv_scaling_active && g_actualContentWidth > 650) {
++            for (NSTrackingArea* area in [self trackingAreas]) {
++                [self removeTrackingArea:area];
++            }
++            NSRect fullRect = NSMakeRect(0, 0, g_actualContentWidth, g_actualContentHeight);
++            NSTrackingArea* expanded = [[NSTrackingArea alloc] initWithRect:fullRect
++                                                                   options:(NSTrackingMouseMoved |
++                                                                            NSTrackingActiveAlways |
++                                                                            NSTrackingMouseEnteredAndExited)
++                                                                     owner:[self window]
++                                                                  userInfo:nil];
++            [self addTrackingArea:expanded];
++            [expanded release];
++        }
++    }
++
+     - (void) dealloc
+     {
+         [markedText release];
+@@ -542,6 +570,8 @@ - (void) updateLayer
+ 
+         if (image)
+         {
++            if (macdrv_scaling_active)
++                layer.contentsGravity = kCAGravityResize;
+             layer.contents = (id)image;
+             CFRelease(image);
+             [window windowDidDrawContent];
+@@ -1044,7 +1074,7 @@ + (WineWindow*) createWindowWithFeatures:(const struct macdrv_window_features*)w
+         window.queue = queue;
+         window->savedContentMinSize = NSZeroSize;
+         window->savedContentMaxSize = NSMakeSize(FLT_MAX, FLT_MAX);
+-        window->resizable = wf->resizable;
++        window->resizable = YES;
+         window->_lastDisplayTime = [[NSDate distantPast] timeIntervalSinceReferenceDate];
+ 
+         [window registerForDraggedTypes:[NSArray arrayWithObjects:(NSString*)kUTTypeData,
+@@ -1108,7 +1138,7 @@ - (void) dealloc
+     - (BOOL) preventResizing
+     {
+         BOOL preventForClipping = cursor_clipping_locks_windows && [[WineApplicationController sharedController] clippingCursor];
+-        return ([self styleMask] & NSWindowStyleMaskResizable) && (disabled || !resizable || preventForClipping);
++        return NO;
+     }
+ 
+     - (BOOL) allowsMovingWithMaximized:(BOOL)inMaximized
+@@ -1124,6 +1154,10 @@ - (BOOL) allowsMovingWithMaximized:(BOOL)inMaximized
+     - (void) adjustFeaturesForState
+     {
+         NSUInteger style = [self styleMask];
++        if (!(style & NSWindowStyleMaskResizable)) {
++            [self setStyleMask:style | NSWindowStyleMaskResizable];
++            style = [self styleMask];
++        }
+ 
+         if (style & NSWindowStyleMaskClosable)
+             [[self standardWindowButton:NSWindowCloseButton] setEnabled:!self.disabled];
+@@ -1144,6 +1178,8 @@ - (void) adjustFeaturesForState
+         {
+             [self setContentMaxSize:savedContentMaxSize];
+             [self setContentMinSize:savedContentMinSize];
++            /* Don't set aspect ratio here — it constrains programmatic setFrame too.
++               We enforce 4:3 only during user live resize via windowWillResize. */
+         }
+ 
+         if (allow_immovable_windows || cursor_clipping_locks_windows)
+@@ -1224,7 +1260,7 @@ - (void) setWindowFeatures:(const struct macdrv_window_features*)wf
+                 [self setTitle:title];
+         }
+ 
+-        resizable = wf->resizable;
++        resizable = YES;
+         [self adjustFeaturesForState];
+         [self setHasShadow:wf->shadow];
+     }
+@@ -2167,7 +2203,13 @@ - (void) setWineMinSize:(NSSize)minSize maxSize:(NSSize)maxSize
+         if (![self preventResizing])
+         {
+             [self setContentMinSize:minSize];
+-            [self setContentMaxSize:maxSize];
++            /* Override max size for Zoo Tycoon 2 to allow resizing */
++            if ([[self title] containsString:@"Zoo Tycoon 2"] && [[self title] length] < 20) {
++                [self setContentMaxSize:NSMakeSize(FLT_MAX, FLT_MAX)];
++                savedContentMaxSize = NSMakeSize(FLT_MAX, FLT_MAX);
++            } else {
++                [self setContentMaxSize:maxSize];
++            }
+         }
+     }
+ 
+@@ -2351,7 +2393,7 @@ - (void) grabDockIconSnapshotFromWindow:(WineWindow*)window force:(BOOL)force
+ 
+         const void* windowID = (const void*)(CGWindowID)window.windowNumber;
+         CFArrayRef windowIDs = CFArrayCreate(NULL, &windowID, 1, NULL);
+-        CGImageRef windowImage = CGWindowListCreateImageFromArray(CGRectNull, windowIDs, kCGWindowImageBoundsIgnoreFraming);
++        CGImageRef windowImage = NULL; /* obsoleted in macOS 15 */
+         CFRelease(windowIDs);
+         if (!windowImage)
+             return;
+@@ -2738,8 +2780,15 @@ - (void) displayIfNeeded
+ 
+     - (void) setFrame:(NSRect)frameRect display:(BOOL)flag
+     {
+-        if (flag)
+-            [self setAutodisplay:YES];
++        /* Block Wine's programmatic shrink for Zoo Tycoon 2.
++           Allow user live resize through. */
++        if (macdrv_scaling_active && ![self inLiveResize] &&
++            [[self title] containsString:@"Zoo Tycoon 2"] && [[self title] length] < 20 &&
++            self.frame.size.width > 650 &&
++            frameRect.size.width < self.frame.size.width - 5) {
++            frameRect = self.frame;
++        }
++        if (flag) [self setAutodisplay:YES];
+         [super setFrame:frameRect display:flag];
+     }
+ 
+@@ -3074,6 +3123,33 @@ - (void)windowDidResignKey:(NSNotification *)notification
+ 
+     - (void)windowDidResize:(NSNotification *)notification skipSizeMove:(BOOL)skipSizeMove
+     {
++        if (macdrv_scaling_active) {
++            roundedWineFrame = self.frame;
++            /* Pin view to 640x480 and scale via layer transform */
++            if ([[self title] containsString:@"Zoo Tycoon 2"] && [[self title] length] < 20) {
++                WineContentView* cv = (WineContentView*)[self contentView];
++                if (cv) {
++                    NSRect content = [self contentRectForFrameRect:self.frame];
++                    /* Track actual content size for mouse coordinate scaling */
++                    g_actualContentWidth = (int)content.size.width;
++                    g_actualContentHeight = (int)content.size.height;
++                    /* Always reset view to 640x480 */
++                    if (fabs(cv.frame.size.width - 640) > 2 || fabs(cv.frame.size.height - 480) > 2) {
++                        [cv setFrameSize:NSMakeSize(640, 480)];
++                    }
++                    /* Scale the 640x480 view to fill the window */
++                    CALayer* layer = [cv layer];
++                    if (layer && content.size.width > 10) {
++                        CGFloat sx = content.size.width / 640.0;
++                        CGFloat sy = content.size.height / 480.0;
++                        layer.transform = CATransform3DMakeScale(sx, sy, 1.0);
++                        layer.anchorPoint = CGPointMake(0, 0);
++                        layer.position = CGPointMake(0, 0);
++                        layer.masksToBounds = NO;
++                    }
++                }
++            }
++        }
+         NSRect frame = self.wine_fractionalFrame;
+ 
+         if ([self inLiveResize])
+@@ -3174,6 +3250,17 @@ - (void)windowWillMiniaturize:(NSNotification *)notification
+ 
+     - (NSSize) windowWillResize:(NSWindow*)sender toSize:(NSSize)frameSize
+     {
++        if (macdrv_scaling_active && [[self title] containsString:@"Zoo Tycoon 2"] && [[self title] length] < 20) {
++            /* Enforce 4:3 aspect ratio and minimum size during user resize */
++            NSRect contentRect = [self contentRectForFrameRect:NSMakeRect(0, 0, frameSize.width, frameSize.height)];
++            if (contentRect.size.width < 640) contentRect.size.width = 640;
++            if (contentRect.size.height < 480) contentRect.size.height = 480;
++            CGFloat targetW = contentRect.size.height * 4.0 / 3.0;
++            contentRect.size.width = targetW;
++            NSRect adjusted = [self frameRectForContentRect:contentRect];
++            frameSize = adjusted.size;
++            return frameSize;
++        }
+         if ([self inLiveResize])
+         {
+             if (maximized)
+diff --git a/dlls/winemac.drv/mouse.c b/dlls/winemac.drv/mouse.c
+index 724503f..27eac98 100644
+--- a/dlls/winemac.drv/mouse.c
++++ b/dlls/winemac.drv/mouse.c
+@@ -32,6 +32,9 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(cursor);
+ 
++extern int g_actualContentWidth;
++extern int g_actualContentHeight;
++
+ 
+ static pthread_mutex_t cursor_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+ static CFMutableDictionaryRef cursor_cache;
+@@ -134,6 +137,22 @@ static void send_mouse_input(HWND hwnd, macdrv_window cocoa_window, UINT flags,
+ 
+     top_level_hwnd = NtUserGetAncestor(hwnd, GA_ROOT);
+ 
++    /* Scale mouse coordinates for Zoo Tycoon 2 window scaling.
++       The macOS window is larger than 640x480, but the game expects 640x480 coords.
++       g_actualContentWidth/Height are set by cocoa_window.m windowDidResize. */
++    if ((flags & MOUSEEVENTF_ABSOLUTE) && top_level_hwnd &&
++        g_actualContentWidth > 650 && g_actualContentHeight > 490)
++    {
++        RECT wr;
++        if (NtUserGetWindowRect(top_level_hwnd, &wr))
++        {
++            int relX = x - wr.left;
++            int relY = y - wr.top;
++            x = wr.left + relX * 640 / g_actualContentWidth;
++            y = wr.top + relY * 480 / g_actualContentHeight;
++        }
++    }
++
+     if ((flags & MOUSEEVENTF_MOVE) && (flags & MOUSEEVENTF_ABSOLUTE) && !drag &&
+         cocoa_window != macdrv_thread_data()->capture_window)
+     {
