@@ -2,7 +2,7 @@
 
 Zoo Tycoon 2 Ultimate Collection (2004) is a Windows-only DirectX 9 game. It doesn't run on macOS out of the box. Even [Wine](https://www.winehq.org/) (a compatibility layer that runs Windows software on other operating systems) can't handle it on its own, because the game checks for specific NVIDIA/ATI graphics cards from 2004 and refuses to start if it doesn't find one.
 
-This repo contains a custom proxy DLL and runtime binary patches that trick the game into running. It plays in a normal macOS window through Wine's OpenGL backend.
+This repo contains a custom proxy DLL and runtime binary patches that trick the game into running. It plays in a resizable macOS window through Wine's OpenGL backend, with the game content scaling to fill whatever window size you choose.
 
 ## What the proxy does
 
@@ -13,13 +13,29 @@ The proxy DLL (`d3d9.dll`) loads between the game and Wine's real D3D9 implement
 - Forces windowed mode instead of fullscreen, since macOS won't switch to 640x480 and Wine fullscreen traps your keyboard
 - Swaps the game's D3DFMT_D32 depth buffer request for D3DFMT_D24S8, which Wine's OpenGL backend actually supports
 - Hooks `ChangeDisplaySettings` via IAT patching so the game thinks display mode changes succeed
+- Hooks `MessageBoxA` to suppress error dialogs, with an auto-dismiss thread for the game's custom error windows
+- Runs an `EarlyPatchThread` that waits for SafeDisc to decompress the code, then patches error checks before the game's init can trigger them
 - Patches the game binary at runtime after SafeDisc decryption:
   - `capCheck` at 005BBC67: forced to pass (JGE -> JMP)
   - `vidCheck` at 007F1AF6: E_FAIL return patched to S_OK, internal mode count check NOPed
   - Renderer creation gate at 005BBCD1: forced to pass
 - Patches wined3d.dll's framebuffer completeness checks (macOS OpenGL returns GL_INVALID_FRAMEBUFFER_OPERATION on certain FBO configurations that work fine on Linux)
 
-There's also `click_continue.exe`, a small Win32 app that runs alongside the game and automatically clicks through the EULA, the "old driver" warning dialog, and the "unable to create renderer" error dialog. The error dialog's Continue button is normally grayed out, so the tool force-enables it and clicks Safe Mode.
+There's also `click_continue.exe`, a small Win32 app that runs alongside the game and automatically clicks through the EULA and any remaining warning dialogs.
+
+## Window scaling
+
+The game renders internally at 640x480, but the window is freely resizable. A custom patch to Wine's `winemac.drv` handles the scaling:
+
+- The WineContentView is pinned to 640x480 (keeping the GL framebuffer at game resolution)
+- A `CATransform3D` on the view's layer visually scales the content to fill the window
+- `contentsGravity = kCAGravityResize` handles 2D surface content (intro videos)
+- `windowWillResize:toSize:` enforces 4:3 aspect ratio with a 640x480 minimum
+- `setFrame:display:` blocks Wine's programmatic shrinks back to 640x480
+- Mouse coordinates are scaled from window space to 640x480 game space in `cocoa_app.m` and `macdrv_get_cursor_position`
+- The NSTrackingArea is expanded to cover the full window so hover events work everywhere
+
+The patch is saved as `d3d9_proxy/winemac_complete.patch` and must be applied to Wine's source tree before building `winemac.so`.
 
 ## Requirements
 
@@ -85,7 +101,8 @@ macOS adds its own problems: no 640x480 fullscreen mode on Retina displays, depr
 - `d3d9_proxy/d3d9_proxy.c` - the proxy DLL (GPU spoof, mode injection, binary patches, FBO fixes)
 - `d3d9_proxy/cds_hook.c` - ChangeDisplaySettings IAT hook
 - `d3d9_proxy/click_continue.c` - dialog auto-clicker
-- `play_zoo_tycoon.sh` - launch script
+- `d3d9_proxy/winemac_complete.patch` - Wine winemac.drv patch for window scaling + mouse mapping
+- `play.sh` - launch script
 
 ## License
 
