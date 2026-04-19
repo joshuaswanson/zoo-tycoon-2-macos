@@ -423,7 +423,7 @@ index ec2a292..a9df8a5 100644
          {
              if (maximized)
 diff --git a/dlls/winemac.drv/mouse.c b/dlls/winemac.drv/mouse.c
-index 724503f..15a2b13 100644
+index 724503f..288a742 100644
 --- a/dlls/winemac.drv/mouse.c
 +++ b/dlls/winemac.drv/mouse.c
 @@ -32,6 +32,17 @@
@@ -488,7 +488,7 @@ index 724503f..15a2b13 100644
      if ((flags & MOUSEEVENTF_MOVE) && (flags & MOUSEEVENTF_ABSOLUTE) && !drag &&
          cocoa_window != macdrv_thread_data()->capture_window)
      {
-@@ -873,12 +921,30 @@ done:
+@@ -873,12 +921,39 @@ done:
   */
  BOOL macdrv_SetCursorPos(INT x, INT y)
  {
@@ -498,22 +498,31 @@ index 724503f..15a2b13 100644
 -    else
 -        ERR("failed to warp to %d,%d\n", x, y);
 -    return ret;
-+    /* Inverse of the scaling applied in send_mouse_input/macdrv_get_cursor_position:
-+       game passes screen coords matching its 640x480 cursor space (post-scale);
-+       we must warp the hardware cursor to the corresponding on-screen pixel. */
++    int orig_x = x, orig_y = y;
++    /* Inverse of the scaling applied in send_mouse_input/macdrv_get_cursor_position.
++       The input (x, y) is in Wine's (possibly stale) screen coord space — i.e.,
++       relative to Wine's internal client_rect. Decompose using Wine's own
++       window-rect lookup, then re-project onto the real on-screen window. */
 +    if (g_actualContentWidth > 650 && g_actualContentHeight > 490 &&
 +        g_scaleFactor > 0.01f && g_real_window_right > g_real_window_left)
 +    {
-+        int rs = retina_on ? 2 : 1;
-+        int title_offset = g_fullscreen_active ? 0
-+            : (g_real_window_bottom - g_real_window_top - g_actualContentHeight);
-+        int gx, gy;
-+        if (title_offset < 0) title_offset = 0;
-+        gx = x - g_real_window_left * rs;
-+        gy = y - (g_real_window_top + title_offset) * rs;
-+        x = g_real_window_left * rs + (int)(g_scaleOffsetX * rs) + (int)(gx * g_scaleFactor);
-+        y = (g_real_window_top + title_offset) * rs + (int)(g_scaleOffsetY * rs) + (int)(gy * g_scaleFactor);
++        HWND fg = NtUserGetForegroundWindow();
++        RECT wr;
++        if (fg && NtUserGetWindowRect(fg, &wr)) {
++            int rs = retina_on ? 2 : 1;
++            int wineTitleH = wr.bottom - wr.top - 480 * rs;
++            int title_offset = g_fullscreen_active ? 0
++                : (g_real_window_bottom - g_real_window_top - g_actualContentHeight);
++            int gx, gy;
++            if (wineTitleH < 0) wineTitleH = 0;
++            if (title_offset < 0) title_offset = 0;
++            gx = x - wr.left;
++            gy = y - wr.top - wineTitleH;
++            x = g_real_window_left * rs + (int)(g_scaleOffsetX * rs) + (int)(gx * g_scaleFactor + 0.5f);
++            y = (g_real_window_top + title_offset) * rs + (int)(g_scaleOffsetY * rs) + (int)(gy * g_scaleFactor + 0.5f);
++        }
 +    }
++    (void)orig_x; (void)orig_y;
 +    {
 +        BOOL ret = macdrv_set_cursor_position(CGPointMake(x, y));
 +        if (ret)
