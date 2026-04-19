@@ -1,5 +1,5 @@
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index b433838..cf1d873 100644
+index b433838..75a373b 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
 @@ -1552,6 +1552,38 @@ - (void) handleMouseMove:(NSEvent*)anEvent
@@ -69,7 +69,7 @@ index b433838..cf1d873 100644
                  pt = cgpoint_win_from_mac(pt);
  
                  event = macdrv_create_event(MOUSE_BUTTON, window);
-@@ -2758,7 +2811,40 @@ int macdrv_get_cursor_position(CGPoint *pos)
+@@ -2758,7 +2811,53 @@ int macdrv_get_cursor_position(CGPoint *pos)
      OnMainThread(^{
          NSPoint location = [NSEvent mouseLocation];
          location = [[WineApplicationController sharedController] flippedMouseLocation:location];
@@ -80,33 +80,46 @@ index b433838..cf1d873 100644
 +           Must match the formula in mouse.c send_mouse_input exactly.
 +           Scale AFTER cgpoint_win_from_mac so we're in Win32 space. */
 +        *pos = cgpoint_win_from_mac(cgpos);
-+        if (macdrv_scaling_active && g_actualContentWidth > 650 && g_actualContentHeight > 490) {
++        if (macdrv_scaling_active && g_actualContentWidth > 650 && g_actualContentHeight > 490 &&
++            g_scaleFactor > 0.01f) {
++            int rs = retina_on ? 2 : 1;
 +            for (NSWindow* win in [NSApp windows]) {
 +                if ([win isKindOfClass:[WineWindow class]] &&
 +                    [[win title] containsString:@"Zoo Tycoon 2"] &&
 +                    [[win title] length] < 20) {
 +                    NSRect wineFrame = [(WineWindow*)win wine_fractionalFrame];
-+                    int rs = retina_on ? 2 : 1;
-+                    int wineW = (int)(wineFrame.size.width * rs);
-+                    /* Estimate wine content height: view is 640x480 */
-+                    int wineContentH = 480 * rs;
-+                    int titleH = (int)(wineFrame.size.height * rs) - wineContentH;
-+                    int actualContentW = g_actualContentWidth * rs;
-+                    int actualContentH = g_actualContentHeight * rs;
-+                    int wineLeft = (int)(wineFrame.origin.x * rs);
-+                    /* CG top in Win32 */
 +                    WineApplicationController* ctrl = [WineApplicationController sharedController];
 +                    CGFloat screenH = [ctrl primaryScreenHeight];
++                    int wineLeft = (int)(wineFrame.origin.x * rs);
 +                    int wineTop = (int)((screenH - wineFrame.origin.y - wineFrame.size.height) * rs);
-+                    int relX = (int)pos->x - wineLeft; /* NOT wr.left, but same value */
-+                    int relY = (int)pos->y - wineTop - titleH;
-+                    pos->x = wineLeft + relX * wineW / actualContentW;
-+                    pos->y = wineTop + titleH + relY * wineContentH / actualContentH;
++                    int titleH = (int)(wineFrame.size.height * rs) - 480 * rs;
++                    int ref_left, ref_top;
++                    int relX, relY, gx, gy;
++                    if (titleH < 0) titleH = 0;
++                    if (g_fullscreen_active && g_real_window_right > g_real_window_left) {
++                        ref_left = g_real_window_left * rs;
++                        ref_top = g_real_window_top * rs;
++                    } else {
++                        ref_left = wineLeft;
++                        ref_top = wineTop + titleH;
++                    }
++                    relX = (int)pos->x - ref_left - (int)(g_scaleOffsetX * rs);
++                    relY = (int)pos->y - ref_top - (int)(g_scaleOffsetY * rs);
++                    gx = (int)(relX / g_scaleFactor);
++                    gy = (int)(relY / g_scaleFactor);
++                    /* Output in Wine client-screen coords so game's GetCursorPos-based
++                       logic works. For windowed, client starts at wineLeft, wineTop+titleH.
++                       For fullscreen, client is the full window (no NC) — use wineLeft/wineTop. */
++                    if (g_fullscreen_active) {
++                        pos->x = wineLeft + gx;
++                        pos->y = wineTop + gy;
++                    } else {
++                        pos->x = wineLeft + gx;
++                        pos->y = wineTop + titleH + gy;
++                    }
 +                    break;
 +                }
 +            }
-+        } else {
-+            *pos = cgpoint_win_from_mac(cgpos);
 +        }
      });
  
@@ -159,10 +172,10 @@ index ce8788b..9daf709 100644
      [pool release];
  }
 diff --git a/dlls/winemac.drv/cocoa_window.h b/dlls/winemac.drv/cocoa_window.h
-index a83f2aa..158214a 100644
+index a83f2aa..ff98212 100644
 --- a/dlls/winemac.drv/cocoa_window.h
 +++ b/dlls/winemac.drv/cocoa_window.h
-@@ -111,3 +111,12 @@ - (void) updateForCursorClipping;
+@@ -111,3 +111,17 @@ - (void) updateForCursorClipping;
      - (void) setRetinaMode:(int)mode;
  
  @end
@@ -175,11 +188,16 @@ index a83f2aa..158214a 100644
 +extern float g_scaleFactor;
 +extern float g_scaleOffsetX;
 +extern float g_scaleOffsetY;
++extern int g_fullscreen_active;
++extern int g_real_window_left;
++extern int g_real_window_top;
++extern int g_real_window_right;
++extern int g_real_window_bottom;
 diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
-index ec2a292..4ffd557 100644
+index ec2a292..a9df8a5 100644
 --- a/dlls/winemac.drv/cocoa_window.m
 +++ b/dlls/winemac.drv/cocoa_window.m
-@@ -480,6 +480,15 @@ - (NSFocusRingType) focusRingType
+@@ -480,6 +480,23 @@ - (NSFocusRingType) focusRingType
  @end
  
  
@@ -191,11 +209,19 @@ index ec2a292..4ffd557 100644
 +float g_scaleFactor = 1.0f;
 +float g_scaleOffsetX = 0.0f;
 +float g_scaleOffsetY = 0.0f;
++int g_fullscreen_active = 0;
++/* Real on-screen window rect in CG points (Win32 logical coords when rs=1).
++   Used by mouse.c/cocoa_app.m in fullscreen where Wine's NtUserGetWindowRect
++   returns the stale pre-fullscreen rect. */
++int g_real_window_left = 0;
++int g_real_window_top = 0;
++int g_real_window_right = 0;
++int g_real_window_bottom = 0;
 +
  @implementation WineContentView
  
  @synthesize everHadGLContext = _everHadGLContext;
-@@ -496,6 +505,28 @@ - (instancetype) initWithFrame:(NSRect)frame
+@@ -496,6 +513,28 @@ - (instancetype) initWithFrame:(NSRect)frame
          return self;
      }
  
@@ -224,7 +250,7 @@ index ec2a292..4ffd557 100644
      - (void) dealloc
      {
          [markedText release];
-@@ -542,6 +573,8 @@ - (void) updateLayer
+@@ -542,6 +581,8 @@ - (void) updateLayer
  
          if (image)
          {
@@ -233,7 +259,7 @@ index ec2a292..4ffd557 100644
              layer.contents = (id)image;
              CFRelease(image);
              [window windowDidDrawContent];
-@@ -1044,7 +1077,7 @@ + (WineWindow*) createWindowWithFeatures:(const struct macdrv_window_features*)w
+@@ -1044,7 +1085,7 @@ + (WineWindow*) createWindowWithFeatures:(const struct macdrv_window_features*)w
          window.queue = queue;
          window->savedContentMinSize = NSZeroSize;
          window->savedContentMaxSize = NSMakeSize(FLT_MAX, FLT_MAX);
@@ -242,7 +268,7 @@ index ec2a292..4ffd557 100644
          window->_lastDisplayTime = [[NSDate distantPast] timeIntervalSinceReferenceDate];
  
          [window registerForDraggedTypes:[NSArray arrayWithObjects:(NSString*)kUTTypeData,
-@@ -1108,7 +1141,7 @@ - (void) dealloc
+@@ -1108,7 +1149,7 @@ - (void) dealloc
      - (BOOL) preventResizing
      {
          BOOL preventForClipping = cursor_clipping_locks_windows && [[WineApplicationController sharedController] clippingCursor];
@@ -251,7 +277,7 @@ index ec2a292..4ffd557 100644
      }
  
      - (BOOL) allowsMovingWithMaximized:(BOOL)inMaximized
-@@ -1124,6 +1157,10 @@ - (BOOL) allowsMovingWithMaximized:(BOOL)inMaximized
+@@ -1124,6 +1165,10 @@ - (BOOL) allowsMovingWithMaximized:(BOOL)inMaximized
      - (void) adjustFeaturesForState
      {
          NSUInteger style = [self styleMask];
@@ -262,7 +288,7 @@ index ec2a292..4ffd557 100644
  
          if (style & NSWindowStyleMaskClosable)
              [[self standardWindowButton:NSWindowCloseButton] setEnabled:!self.disabled];
-@@ -1144,6 +1181,8 @@ - (void) adjustFeaturesForState
+@@ -1144,6 +1189,8 @@ - (void) adjustFeaturesForState
          {
              [self setContentMaxSize:savedContentMaxSize];
              [self setContentMinSize:savedContentMinSize];
@@ -271,7 +297,7 @@ index ec2a292..4ffd557 100644
          }
  
          if (allow_immovable_windows || cursor_clipping_locks_windows)
-@@ -1224,7 +1263,7 @@ - (void) setWindowFeatures:(const struct macdrv_window_features*)wf
+@@ -1224,7 +1271,7 @@ - (void) setWindowFeatures:(const struct macdrv_window_features*)wf
                  [self setTitle:title];
          }
  
@@ -280,7 +306,7 @@ index ec2a292..4ffd557 100644
          [self adjustFeaturesForState];
          [self setHasShadow:wf->shadow];
      }
-@@ -2167,7 +2206,13 @@ - (void) setWineMinSize:(NSSize)minSize maxSize:(NSSize)maxSize
+@@ -2167,7 +2214,13 @@ - (void) setWineMinSize:(NSSize)minSize maxSize:(NSSize)maxSize
          if (![self preventResizing])
          {
              [self setContentMinSize:minSize];
@@ -295,7 +321,7 @@ index ec2a292..4ffd557 100644
          }
      }
  
-@@ -2351,7 +2396,7 @@ - (void) grabDockIconSnapshotFromWindow:(WineWindow*)window force:(BOOL)force
+@@ -2351,7 +2404,7 @@ - (void) grabDockIconSnapshotFromWindow:(WineWindow*)window force:(BOOL)force
  
          const void* windowID = (const void*)(CGWindowID)window.windowNumber;
          CFArrayRef windowIDs = CFArrayCreate(NULL, &windowID, 1, NULL);
@@ -304,7 +330,7 @@ index ec2a292..4ffd557 100644
          CFRelease(windowIDs);
          if (!windowImage)
              return;
-@@ -2738,8 +2783,15 @@ - (void) displayIfNeeded
+@@ -2738,8 +2791,15 @@ - (void) displayIfNeeded
  
      - (void) setFrame:(NSRect)frameRect display:(BOOL)flag
      {
@@ -322,7 +348,17 @@ index ec2a292..4ffd557 100644
          [super setFrame:frameRect display:flag];
      }
  
-@@ -3074,6 +3126,43 @@ - (void)windowDidResignKey:(NSNotification *)notification
+@@ -3014,6 +3074,9 @@ - (void) windowDidEnterFullScreen:(NSNotification*)notification
+         enteredFullScreenTime = [[NSProcessInfo processInfo] systemUptime];
+         if (pendingOrderOut)
+             [self doOrderOut];
++        /* Re-apply view pin + layer transform after AppKit finishes fullscreen layout */
++        if (macdrv_scaling_active)
++            [self windowDidResize:nil];
+     }
+ 
+     - (void) windowDidExitFullScreen:(NSNotification*)notification
+@@ -3074,6 +3137,54 @@ - (void)windowDidResignKey:(NSNotification *)notification
  
      - (void)windowDidResize:(NSNotification *)notification skipSizeMove:(BOOL)skipSizeMove
      {
@@ -342,6 +378,17 @@ index ec2a292..4ffd557 100644
 +                    }
 +                    /* Scale the 640x480 view to fill the window, maintaining aspect ratio */
 +                    CALayer* layer = [cv layer];
++                    g_fullscreen_active = ([self styleMask] & NSWindowStyleMaskFullScreen) ? 1 : 0;
++                    /* Publish real on-screen window rect in Win32/CG top-down coords */
++                    {
++                        NSArray* screens = [NSScreen screens];
++                        CGFloat screenH = [screens count] > 0 ? NSHeight([[screens objectAtIndex:0] frame]) : 0;
++                        NSRect f = self.frame;
++                        g_real_window_left = (int)f.origin.x;
++                        g_real_window_top = (int)(screenH - f.origin.y - f.size.height);
++                        g_real_window_right = g_real_window_left + (int)f.size.width;
++                        g_real_window_bottom = g_real_window_top + (int)f.size.height;
++                    }
 +                    if (layer && content.size.width > 10) {
 +                        CGFloat sx = content.size.width / 640.0;
 +                        CGFloat sy = content.size.height / 480.0;
@@ -366,7 +413,7 @@ index ec2a292..4ffd557 100644
          NSRect frame = self.wine_fractionalFrame;
  
          if ([self inLiveResize])
-@@ -3174,6 +3263,17 @@ - (void)windowWillMiniaturize:(NSNotification *)notification
+@@ -3174,6 +3285,17 @@ - (void)windowWillMiniaturize:(NSNotification *)notification
  
      - (NSSize) windowWillResize:(NSWindow*)sender toSize:(NSSize)frameSize
      {
@@ -385,20 +432,28 @@ index ec2a292..4ffd557 100644
          {
              if (maximized)
 diff --git a/dlls/winemac.drv/mouse.c b/dlls/winemac.drv/mouse.c
-index 724503f..b4ec1d8 100644
+index 724503f..6ee1d2b 100644
 --- a/dlls/winemac.drv/mouse.c
 +++ b/dlls/winemac.drv/mouse.c
-@@ -32,6 +32,9 @@
+@@ -32,6 +32,17 @@
  
  WINE_DEFAULT_DEBUG_CHANNEL(cursor);
  
 +extern int g_actualContentWidth;
 +extern int g_actualContentHeight;
++extern float g_scaleFactor;
++extern float g_scaleOffsetX;
++extern float g_scaleOffsetY;
++extern int g_fullscreen_active;
++extern int g_real_window_left;
++extern int g_real_window_top;
++extern int g_real_window_right;
++extern int g_real_window_bottom;
 +
  
  static pthread_mutex_t cursor_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
  static CFMutableDictionaryRef cursor_cache;
-@@ -134,6 +137,33 @@ static void send_mouse_input(HWND hwnd, macdrv_window cocoa_window, UINT flags,
+@@ -134,6 +145,45 @@ static void send_mouse_input(HWND hwnd, macdrv_window cocoa_window, UINT flags,
  
      top_level_hwnd = NtUserGetAncestor(hwnd, GA_ROOT);
  
@@ -408,23 +463,35 @@ index 724503f..b4ec1d8 100644
 +       NtUserGetWindowRect returns the Wine WINDOW rect in Win32 space.
 +       Scale content area only (title bar pixels are not scaled). */
 +    if ((flags & MOUSEEVENTF_ABSOLUTE) && top_level_hwnd &&
-+        g_actualContentWidth > 650 && g_actualContentHeight > 490)
++        g_actualContentWidth > 650 && g_actualContentHeight > 490 &&
++        g_scaleFactor > 0.01f)
 +    {
-+        RECT wr;
-+        if (NtUserGetWindowRect(top_level_hwnd, &wr))
++        RECT cr;
++        /* Query Wine's actual client rect in SCREEN coords: first get client size,
++           then map (0,0) to screen to find client_rect top-left. */
++        if (NtUserGetClientRect(top_level_hwnd, &cr))
 +        {
 +            int rs = retina_on ? 2 : 1;
-+            int wineW = wr.right - wr.left;
-+            int wineH = wr.bottom - wr.top;
-+            int wineContentH = 480 * rs;
-+            int titleH = wineH - wineContentH;
-+            int actualContentW = g_actualContentWidth * rs;
-+            int actualContentH = g_actualContentHeight * rs;
-+            if (actualContentW > wineW + 10) {
-+                int relX = x - wr.left;
-+                int relY = y - wr.top - titleH;
-+                x = wr.left + relX * wineW / actualContentW;
-+                y = wr.top + titleH + relY * wineContentH / actualContentH;
++            POINT origin = { 0, 0 };
++            NtUserClientToScreen(top_level_hwnd, &origin);
++            /* Scale reference: where the VISIBLE game area sits on-screen.
++               In fullscreen, use g_real_window_* (Wine's info is stale). */
++            int ref_left, ref_top;
++            if (g_fullscreen_active && g_real_window_right > g_real_window_left) {
++                ref_left = g_real_window_left * rs;
++                ref_top = g_real_window_top * rs;
++            } else {
++                ref_left = origin.x;
++                ref_top = origin.y;
++            }
++            {
++                int relX = x - ref_left - (int)(g_scaleOffsetX * rs);
++                int relY = y - ref_top - (int)(g_scaleOffsetY * rs);
++                int gx = (int)(relX / g_scaleFactor);
++                int gy = (int)(relY / g_scaleFactor);
++                /* Output: target Wine's actual client area so ScreenToClient returns (gx, gy). */
++                x = origin.x + gx;
++                y = origin.y + gy;
 +            }
 +        }
 +    }
