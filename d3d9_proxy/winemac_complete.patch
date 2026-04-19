@@ -1,5 +1,5 @@
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index b433838..75a373b 100644
+index b433838..f02fb2e 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
 @@ -1552,6 +1552,38 @@ - (void) handleMouseMove:(NSEvent*)anEvent
@@ -69,7 +69,7 @@ index b433838..75a373b 100644
                  pt = cgpoint_win_from_mac(pt);
  
                  event = macdrv_create_event(MOUSE_BUTTON, window);
-@@ -2758,7 +2811,53 @@ int macdrv_get_cursor_position(CGPoint *pos)
+@@ -2758,7 +2811,28 @@ int macdrv_get_cursor_position(CGPoint *pos)
      OnMainThread(^{
          NSPoint location = [NSEvent mouseLocation];
          location = [[WineApplicationController sharedController] flippedMouseLocation:location];
@@ -81,45 +81,20 @@ index b433838..75a373b 100644
 +           Scale AFTER cgpoint_win_from_mac so we're in Win32 space. */
 +        *pos = cgpoint_win_from_mac(cgpos);
 +        if (macdrv_scaling_active && g_actualContentWidth > 650 && g_actualContentHeight > 490 &&
-+            g_scaleFactor > 0.01f) {
++            g_scaleFactor > 0.01f && g_real_window_right > g_real_window_left) {
 +            int rs = retina_on ? 2 : 1;
-+            for (NSWindow* win in [NSApp windows]) {
-+                if ([win isKindOfClass:[WineWindow class]] &&
-+                    [[win title] containsString:@"Zoo Tycoon 2"] &&
-+                    [[win title] length] < 20) {
-+                    NSRect wineFrame = [(WineWindow*)win wine_fractionalFrame];
-+                    WineApplicationController* ctrl = [WineApplicationController sharedController];
-+                    CGFloat screenH = [ctrl primaryScreenHeight];
-+                    int wineLeft = (int)(wineFrame.origin.x * rs);
-+                    int wineTop = (int)((screenH - wineFrame.origin.y - wineFrame.size.height) * rs);
-+                    int titleH = (int)(wineFrame.size.height * rs) - 480 * rs;
-+                    int ref_left, ref_top;
-+                    int relX, relY, gx, gy;
-+                    if (titleH < 0) titleH = 0;
-+                    if (g_fullscreen_active && g_real_window_right > g_real_window_left) {
-+                        ref_left = g_real_window_left * rs;
-+                        ref_top = g_real_window_top * rs;
-+                    } else {
-+                        ref_left = wineLeft;
-+                        ref_top = wineTop + titleH;
-+                    }
-+                    relX = (int)pos->x - ref_left - (int)(g_scaleOffsetX * rs);
-+                    relY = (int)pos->y - ref_top - (int)(g_scaleOffsetY * rs);
-+                    gx = (int)(relX / g_scaleFactor);
-+                    gy = (int)(relY / g_scaleFactor);
-+                    /* Output in Wine client-screen coords so game's GetCursorPos-based
-+                       logic works. For windowed, client starts at wineLeft, wineTop+titleH.
-+                       For fullscreen, client is the full window (no NC) — use wineLeft/wineTop. */
-+                    if (g_fullscreen_active) {
-+                        pos->x = wineLeft + gx;
-+                        pos->y = wineTop + gy;
-+                    } else {
-+                        pos->x = wineLeft + gx;
-+                        pos->y = wineTop + titleH + gy;
-+                    }
-+                    break;
-+                }
-+            }
++            int title_offset = g_fullscreen_active ? 0
++                : (g_real_window_bottom - g_real_window_top - g_actualContentHeight);
++            int relX, relY, gx, gy;
++            if (title_offset < 0) title_offset = 0;
++            relX = (int)pos->x - g_real_window_left * rs - (int)(g_scaleOffsetX * rs);
++            relY = (int)pos->y - (g_real_window_top + title_offset) * rs - (int)(g_scaleOffsetY * rs);
++            gx = (int)(relX / g_scaleFactor);
++            gy = (int)(relY / g_scaleFactor);
++            /* Output: use on-screen window origin so game's Win32-space cursor lands
++               where the user's cursor visually is. Title offset only applied in windowed. */
++            pos->x = g_real_window_left * rs + gx;
++            pos->y = (g_real_window_top + title_offset) * rs + gy;
 +        }
      });
  
@@ -432,7 +407,7 @@ index ec2a292..a9df8a5 100644
          {
              if (maximized)
 diff --git a/dlls/winemac.drv/mouse.c b/dlls/winemac.drv/mouse.c
-index 724503f..6ee1d2b 100644
+index 724503f..a76c4cd 100644
 --- a/dlls/winemac.drv/mouse.c
 +++ b/dlls/winemac.drv/mouse.c
 @@ -32,6 +32,17 @@
@@ -453,7 +428,7 @@ index 724503f..6ee1d2b 100644
  
  static pthread_mutex_t cursor_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
  static CFMutableDictionaryRef cursor_cache;
-@@ -134,6 +145,45 @@ static void send_mouse_input(HWND hwnd, macdrv_window cocoa_window, UINT flags,
+@@ -134,6 +145,43 @@ static void send_mouse_input(HWND hwnd, macdrv_window cocoa_window, UINT flags,
  
      top_level_hwnd = NtUserGetAncestor(hwnd, GA_ROOT);
  
@@ -464,36 +439,34 @@ index 724503f..6ee1d2b 100644
 +       Scale content area only (title bar pixels are not scaled). */
 +    if ((flags & MOUSEEVENTF_ABSOLUTE) && top_level_hwnd &&
 +        g_actualContentWidth > 650 && g_actualContentHeight > 490 &&
-+        g_scaleFactor > 0.01f)
++        g_scaleFactor > 0.01f &&
++        g_real_window_right > g_real_window_left)
 +    {
-+        RECT cr;
-+        /* Query Wine's actual client rect in SCREEN coords: first get client size,
-+           then map (0,0) to screen to find client_rect top-left. */
-+        if (NtUserGetClientRect(top_level_hwnd, &cr))
-+        {
-+            int rs = retina_on ? 2 : 1;
-+            POINT origin = { 0, 0 };
-+            NtUserClientToScreen(top_level_hwnd, &origin);
-+            /* Scale reference: where the VISIBLE game area sits on-screen.
-+               In fullscreen, use g_real_window_* (Wine's info is stale). */
-+            int ref_left, ref_top;
-+            if (g_fullscreen_active && g_real_window_right > g_real_window_left) {
-+                ref_left = g_real_window_left * rs;
-+                ref_top = g_real_window_top * rs;
-+            } else {
-+                ref_left = origin.x;
-+                ref_top = origin.y;
-+            }
-+            {
-+                int relX = x - ref_left - (int)(g_scaleOffsetX * rs);
-+                int relY = y - ref_top - (int)(g_scaleOffsetY * rs);
-+                int gx = (int)(relX / g_scaleFactor);
-+                int gy = (int)(relY / g_scaleFactor);
-+                /* Output: target Wine's actual client area so ScreenToClient returns (gx, gy). */
-+                x = origin.x + gx;
-+                y = origin.y + gy;
-+            }
-+        }
++        /* Scale ref: current on-screen window position from cocoa_window.m
++           (Wine's wineFrame goes stale when user drags the window or enters
++           macOS fullscreen). Output base: Wine's actual client area via
++           NtUserClientToScreen so ScreenToClient yields the right 640x480
++           client coord regardless of Wine's internal state. */
++        POINT origin = { 0, 0 };
++        int rs = retina_on ? 2 : 1;
++        int relX, relY, gx, gy;
++        int title_offset;
++        NtUserClientToScreen(top_level_hwnd, &origin);
++        /* In windowed mode, the visible game area starts below the native
++           macOS title bar. g_real_window_top is the window's top; the content
++           area is at g_real_window_top + (window_height - content_height).
++           In fullscreen there's no title. We approximate via wineFrame's
++           non-client height — which is wineFrame.h - 480 in windowed (Wine
++           added ~55 for title/border around the pinned view). */
++        title_offset = g_fullscreen_active ? 0
++            : (g_real_window_bottom - g_real_window_top - g_actualContentHeight);
++        if (title_offset < 0) title_offset = 0;
++        relX = x - g_real_window_left * rs - (int)(g_scaleOffsetX * rs);
++        relY = y - (g_real_window_top + title_offset) * rs - (int)(g_scaleOffsetY * rs);
++        gx = (int)(relX / g_scaleFactor);
++        gy = (int)(relY / g_scaleFactor);
++        x = origin.x + gx;
++        y = origin.y + gy;
 +    }
 +
      if ((flags & MOUSEEVENTF_MOVE) && (flags & MOUSEEVENTF_ABSOLUTE) && !drag &&
