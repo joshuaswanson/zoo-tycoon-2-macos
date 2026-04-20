@@ -6,12 +6,14 @@ The game runs in a resizable window with 4:3 aspect ratio. Drag the window edges
 
 ## Quick start
 
-You'll need [Homebrew](https://brew.sh) installed and the game files. The repo does not ship the game — grab a copy from [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection-cx5/) (or use your own disc), extract it, and put the contents into a `Game Files/` folder next to the scripts. Then in Terminal run:
+1. Install [Homebrew](https://brew.sh) if you don't already have it.
+2. Download the game from [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection-cx5/) and extract it. The archive contains a `Game Files` folder — drop that folder into this repo next to `setup.sh`.
+3. In Terminal, from this repo:
 
-```bash
-./setup.sh
-./play_zoo_tycoon.sh
-```
+   ```bash
+   ./setup.sh
+   ./play_zoo_tycoon.sh
+   ```
 
 `setup.sh` installs Wine Crossover, mingw-w64, and winetricks, configures Wine, builds the compatibility layer, and deploys everything into `Game Files/`. It is idempotent, so re-running it after updates is safe.
 
