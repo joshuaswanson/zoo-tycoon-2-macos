@@ -2,6 +2,9 @@
 # Zoo Tycoon 2 Ultimate Collection - macOS Launcher
 # Runs via Wine with D3D9 proxy (GPU spoof + mode injection + OpenGL renderer)
 
+# Rebrand process + menu bar as "Zoo Tycoon 2" (read by our winemac.drv patch).
+export WINE_APP_NAME="Zoo Tycoon 2"
+
 cd "$(dirname "$0")/Game Files"
 
 # Kill any existing Wine processes

@@ -1,8 +1,119 @@
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index b433838..7ca6ecd 100644
+index b433838..74f05a4 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
-@@ -1552,6 +1552,38 @@ - (void) handleMouseMove:(NSEvent*)anEvent
+@@ -19,6 +19,7 @@
+  */
+ 
+ #import <Carbon/Carbon.h>
++#import <objc/runtime.h>
+ 
+ #import "cocoa_app.h"
+ #import "cocoa_cursorclipping.h"
+@@ -311,6 +312,70 @@ - (void) changeEditMenuKeyEquivalentsForWindow:(NSWindow*)window
+ 
+     - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+     {
++        /* WINE_APP_NAME: override the Dock tooltip + menu-bar app label.
++           macOS caches these in LaunchServices from the binary's bundle at launch
++           time, so NSBundle swizzling + NSMenu titles aren't enough — we have to
++           poke LaunchServices directly via private API _LSSetApplicationInformationItem. */
++        {
++            const char* _n = getenv("WINE_APP_NAME");
++            if (_n && *_n) {
++                static dispatch_once_t _o;
++                dispatch_once(&_o, ^{
++                    NSString* name = [NSString stringWithUTF8String:_n];
++                    [[NSProcessInfo processInfo] setProcessName:name];
++                    /* Swizzle NSBundle so Wine's own menu builder reads the new name. */
++                    Class cls = [NSBundle class];
++                    SEL sel = @selector(objectForInfoDictionaryKey:);
++                    Method m = class_getInstanceMethod(cls, sel);
++                    IMP origImp = method_getImplementation(m);
++                    IMP newImp = imp_implementationWithBlock(^id(NSBundle* self, NSString* key) {
++                        if (self == [NSBundle mainBundle] &&
++                            ([key isEqualToString:(NSString*)kCFBundleNameKey] ||
++                             [key isEqualToString:@"CFBundleDisplayName"])) {
++                            return name;
++                        }
++                        return ((id(*)(id, SEL, NSString*))origImp)(self, sel, key);
++                    });
++                    method_setImplementation(m, newImp);
++                    /* Update LaunchServices for Dock tooltip + menu bar label. */
++                    extern CFStringRef _kLSDisplayNameKey __attribute__((weak));
++                    extern CFStringRef _kLSBundleNameKey __attribute__((weak));
++                    extern OSStatus _LSSetApplicationInformationItem(int, void*, CFStringRef, CFTypeRef, CFDictionaryRef*) __attribute__((weak));
++                    extern void* _LSGetCurrentApplicationASN(void) __attribute__((weak));
++                    if (_LSSetApplicationInformationItem && _LSGetCurrentApplicationASN) {
++                        void* asn = _LSGetCurrentApplicationASN();
++                        if (&_kLSDisplayNameKey)
++                            _LSSetApplicationInformationItem(-2, asn, _kLSDisplayNameKey,
++                                (__bridge CFStringRef)name, NULL);
++                        if (&_kLSBundleNameKey)
++                            _LSSetApplicationInformationItem(-2, asn, _kLSBundleNameKey,
++                                (__bridge CFStringRef)name, NULL);
++                        /* Also try the string form directly in case the weak symbols don't resolve. */
++                        _LSSetApplicationInformationItem(-2, asn,
++                            CFSTR("LSDisplayName"), (__bridge CFStringRef)name, NULL);
++                        _LSSetApplicationInformationItem(-2, asn,
++                            CFSTR("CFBundleName"), (__bridge CFStringRef)name, NULL);
++                    }
++                    /* The Dock tooltip reads NSRunningApplication.localizedName.
++                       For unbundled processes that falls back to the exe basename
++                       ("wine-preloader"). Swizzle it so it returns our custom name. */
++                    {
++                        Class rc = [NSRunningApplication class];
++                        SEL ln = @selector(localizedName);
++                        Method mm = class_getInstanceMethod(rc, ln);
++                        IMP origLn = method_getImplementation(mm);
++                        IMP newLn = imp_implementationWithBlock(^NSString*(NSRunningApplication* self) {
++                            if ([self processIdentifier] == getpid()) return name;
++                            return ((NSString*(*)(id, SEL))origLn)(self, ln);
++                        });
++                        method_setImplementation(mm, newLn);
++                    }
++                    NSRunningApplication* curApp = [NSRunningApplication currentApplication];
++                    [curApp willChangeValueForKey:@"localizedName"];
++                    [curApp didChangeValueForKey:@"localizedName"];
++                });
++            }
++        }
+         if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
+         {
+             NSMenu* mainMenu;
+@@ -340,8 +405,20 @@ - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+             mainMenu = [[[NSMenu alloc] init] autorelease];
+ 
+             // Application menu
+-            submenu = [[[NSMenu alloc] initWithTitle:WineLocalizedString(STRING_MENU_WINE)] autorelease];
+-            bundleName = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
++            /* Honor WINE_APP_NAME env var: lets our launcher override the bundle name
++               so the menu bar app label + Hide/Quit items display e.g. "Zoo Tycoon 2"
++               instead of "CrossOver FOSS 23.7.1". */
++            const char* _wineAppName = getenv("WINE_APP_NAME");
++            NSString* _customAppName = (_wineAppName && *_wineAppName)
++                ? [NSString stringWithUTF8String:_wineAppName] : nil;
++            NSString* _appMenuTitle = _customAppName ? _customAppName : WineLocalizedString(STRING_MENU_WINE);
++            submenu = [[[NSMenu alloc] initWithTitle:_appMenuTitle] autorelease];
++            if (_customAppName) {
++                bundleName = _customAppName;
++                [[NSProcessInfo processInfo] setProcessName:_customAppName];
++            } else {
++                bundleName = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
++            }
+ 
+             if ([bundleName length])
+                 title = [NSString stringWithFormat:WineLocalizedString(STRING_MENU_ITEM_HIDE_APPNAME), bundleName];
+@@ -367,7 +444,7 @@ - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+             item = [submenu addItemWithTitle:title action:@selector(terminate:) keyEquivalent:@"q"];
+             [item setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+             item = [[[NSMenuItem alloc] init] autorelease];
+-            [item setTitle:WineLocalizedString(STRING_MENU_WINE)];
++            [item setTitle:_appMenuTitle];
+             [item setSubmenu:submenu];
+             [mainMenu addItem:item];
+ 
+@@ -1552,6 +1629,38 @@ - (void) handleMouseMove:(NSEvent*)anEvent
                      point.y -= rect.origin.y;
                  }
  
@@ -41,7 +152,7 @@ index b433838..7ca6ecd 100644
                  point = cgpoint_win_from_mac(point);
  
                  event = macdrv_create_event(MOUSE_MOVED_ABSOLUTE, targetWindow);
-@@ -1706,6 +1738,27 @@ - (void) handleMouseButton:(NSEvent*)theEvent
+@@ -1706,6 +1815,27 @@ - (void) handleMouseButton:(NSEvent*)theEvent
                      pt.y -= rect.origin.y;
                  }
  
@@ -69,7 +180,7 @@ index b433838..7ca6ecd 100644
                  pt = cgpoint_win_from_mac(pt);
  
                  event = macdrv_create_event(MOUSE_BUTTON, window);
-@@ -2758,7 +2811,44 @@ int macdrv_get_cursor_position(CGPoint *pos)
+@@ -2758,7 +2888,44 @@ int macdrv_get_cursor_position(CGPoint *pos)
      OnMainThread(^{
          NSPoint location = [NSEvent mouseLocation];
          location = [[WineApplicationController sharedController] flippedMouseLocation:location];
