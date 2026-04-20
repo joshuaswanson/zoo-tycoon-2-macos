@@ -15,17 +15,6 @@ You'll need [Homebrew](https://brew.sh) installed and the game files. The repo d
 
 `setup.sh` installs Wine Crossover, mingw-w64, and winetricks, configures Wine, builds the compatibility layer, and deploys everything into `Game Files/`. It is idempotent, so re-running it after updates is safe.
 
-## What you get
-
-- Runs natively on Apple Silicon (M1/M2/M3/M4) and Intel Macs
-- Resizable window that scales the game to fill
-- macOS-native fullscreen via the green button (letterboxed 4:3)
-- 4:3 aspect ratio locked so nothing stretches weird
-- Mouse cursor, click, and hover all stay aligned with visuals in windowed, fullscreen, and after moving/resizing the window
-- All intro videos, menus, and gameplay work
-- Works with all DLC and expansion packs
-- No need to mess with Wine settings, the launch script handles everything
-
 ## Known issues
 
 - Mouse-look mode (holding right-click and dragging to rotate the camera) has a slight upward drift when the window is larger than 640x480. Works fine at default window size.
