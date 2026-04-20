@@ -112,8 +112,10 @@ cp "$WP" "$ZT_WP"
 python3 -c '
 p = "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/Zoo Tycoon 2"
 d = open(p, "rb").read()
-old = b"CrossOver FOSS 23.7.1"
-new = b"Zoo Tycoon 2         "
+# Shift the </string> tag earlier so the parsed content is exactly "Zoo Tycoon 2"
+# (no trailing spaces, which would otherwise appear in the menu bar label).
+old = b"CrossOver FOSS 23.7.1</string>"
+new = b"Zoo Tycoon 2</string>         "
 assert len(old) == len(new)
 d = d.replace(old, new)
 open(p, "wb").write(d)
