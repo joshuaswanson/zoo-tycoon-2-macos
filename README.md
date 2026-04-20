@@ -6,35 +6,14 @@ The game runs in a resizable window with 4:3 aspect ratio. Drag the window edges
 
 ## Quick start
 
-You'll need [Homebrew](https://brew.sh) installed. Open Terminal and run:
+You'll need [Homebrew](https://brew.sh) installed. Put your Zoo Tycoon 2 files in the `Game Files/` folder next to the scripts, then in Terminal run:
 
 ```bash
-# Install Wine (runs Windows games on Mac)
-brew install --cask wine-crossover
-brew install mingw-w64
-brew install winetricks
-
-# One-time Wine setup
-wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gl /f
-wine reg add "HKCU\\Software\\Wine\\Direct3D" /v VideoMemorySize /t REG_SZ /d 512 /f
-wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v d3d9 /t REG_SZ /d native /f
-wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v d3d9_real /t REG_SZ /d builtin /f
-winetricks -q d3dx9
-
-# Build the compatibility layer
-cd d3d9_proxy
-./build.sh
-
-# Deploy it
-cp d3d9.dll click_continue.exe "../Game Files/"
-cp "$(wine --prefix)/lib/wine/i386-windows/d3d9.dll" "../Game Files/d3d9_real.dll"
-```
-
-Then put your Zoo Tycoon 2 game files in the `Game Files/` folder and run:
-
-```bash
+./setup.sh
 ./play_zoo_tycoon.sh
 ```
+
+`setup.sh` installs Wine Crossover, mingw-w64, and winetricks, configures Wine, builds the compatibility layer, and deploys everything into `Game Files/`. It is idempotent, so re-running it after updates is safe.
 
 ## What you get
 
@@ -132,4 +111,5 @@ macOS adds more problems: no 640x480 fullscreen via D3D on Retina (solved by for
 - `d3d9_proxy/cds_hook.c` — ChangeDisplaySettings IAT hook
 - `d3d9_proxy/click_continue.c` — dialog auto-clicker
 - `d3d9_proxy/winemac_complete.patch` — Wine winemac.drv patch for window scaling + mouse mapping (touches `cocoa_window.m`, `cocoa_window.h`, `cocoa_app.m`, `cocoa_opengl.m`, `mouse.c`)
+- `setup.sh` — one-shot installer (deps, Wine config, proxy build, deploy)
 - `play_zoo_tycoon.sh` — launch script
