@@ -21,7 +21,7 @@ You'll need [Homebrew](https://brew.sh) installed. Put your Zoo Tycoon 2 files i
 - Resizable window that scales the game to fill
 - macOS-native fullscreen via the green button (letterboxed 4:3)
 - 4:3 aspect ratio locked so nothing stretches weird
-- Mouse cursor, click, and hover all stay aligned with visuals in both windowed and fullscreen
+- Mouse cursor, click, and hover all stay aligned with visuals in windowed, fullscreen, and after moving/resizing the window
 - All intro videos, menus, and gameplay work
 - Works with all DLC and expansion packs
 - No need to mess with Wine settings, the launch script handles everything
@@ -80,7 +80,7 @@ The game renders at 640x480 internally. A patch to Wine's `winemac.drv` handles 
 - setFrame:display: blocks Wine's programmatic shrinks
 - windowDidEnterFullScreen re-runs windowDidResize so the layer transform gets re-applied after AppKit's fullscreen transition
 - `cocoa_window.m` publishes `g_real_window_*` globals (current on-screen window rect) because Wine's internal `wineFrame` goes stale when the user drags the window or enters macOS fullscreen
-- Mouse coordinate scaling uses `g_real_window_*` for the scaling reference and `NtUserClientToScreen` for the output base, so the game's `ScreenToClient` yields correct 640x480 client coords regardless of Wine's stale state
+- Mouse coordinate scaling uses `g_real_window_*` for the scaling reference and `NtUserClientToScreen` for the output base, so the game's `ScreenToClient` yields correct 640x480 client coords regardless of Wine's stale state; runs at all window sizes so moving the default-size window also works
 - macdrv_get_cursor_position (GetCursorPos polling) mirrors the same transform so hover effects persist when the cursor is stationary
 - macdrv_SetCursorPos inverse-scales the requested cursor position so mouse-look games that re-center the cursor each frame warp the hardware cursor to the actual visual center
 - NSTrackingArea expanded to cover full window content area
