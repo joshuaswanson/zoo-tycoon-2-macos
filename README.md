@@ -5,7 +5,7 @@ Play Zoo Tycoon 2 Ultimate Collection on your Mac, including Apple Silicon Macs 
 ## Quick start
 
 1. Install [Homebrew](https://brew.sh) if you don't already have it.
-2. Download the game from [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection-cx5/) and extract it. The archive contains a `Game Files` folder — drop that folder into this repo next to `setup.sh`.
+2. Download the game from [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection-cx5/) and extract it. The archive contains a `Game Files` folder; drop that folder into this repo next to `setup.sh`.
 3. In Terminal, from this repo:
 
    ```bash
@@ -88,7 +88,7 @@ ZT.exe
 
 ### Dock tooltip + menu bar rebrand
 
-By default Wine processes on macOS show `wine-preloader` as the Dock tooltip and `CrossOver FOSS 23.7.1` as the menu bar app label — both are structural, not reachable via `NSBundle` swizzles, `NSRunningApplication.localizedName` overrides, or the private `_LSSetApplicationInformationItem` LaunchServices API. The Dock tooltip is the binary filename basename; the menu bar app label is read from the binary's embedded `__TEXT,__info_plist` section.
+By default Wine processes on macOS show `wine-preloader` as the Dock tooltip and `CrossOver FOSS 23.7.1` as the menu bar app label. Both are structural. Neither is reachable via `NSBundle` swizzles, `NSRunningApplication.localizedName` overrides, or the private `_LSSetApplicationInformationItem` LaunchServices API. The Dock tooltip is the binary filename basename; the menu bar app label is read from the binary's embedded `__TEXT,__info_plist` section.
 
 `setup.sh` binary-patches Wine Crossover to get both labels right:
 
