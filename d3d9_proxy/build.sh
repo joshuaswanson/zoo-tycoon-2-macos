@@ -12,8 +12,5 @@ $CC -shared -o d3d9.dll d3d9_proxy.c cds_hook.c -ld3d9 -luser32 -Wl,--kill-at $C
 echo "Building click_continue.exe..."
 $CC -o click_continue.exe click_continue.c -luser32 -lgdi32 $CFLAGS
 
-echo "Building list_windows.exe..."
-$CC -o list_windows.exe list_windows.c -luser32 -lgdi32 $CFLAGS
-
 echo "Done! Deploy with:"
 echo "  cp d3d9.dll click_continue.exe \"../Game Files/\""
