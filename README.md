@@ -6,7 +6,7 @@ The game runs in a resizable window with 4:3 aspect ratio. Drag the window edges
 
 ## Quick start
 
-You'll need [Homebrew](https://brew.sh) installed and the game files. The repo does not ship the game — grab a copy from [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection/) (or use your own disc), extract it, and put the contents into a `Game Files/` folder next to the scripts. Then in Terminal run:
+You'll need [Homebrew](https://brew.sh) installed and the game files. The repo does not ship the game — grab a copy from [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection-cx5/) (or use your own disc), extract it, and put the contents into a `Game Files/` folder next to the scripts. Then in Terminal run:
 
 ```bash
 ./setup.sh
@@ -33,7 +33,7 @@ You'll need [Homebrew](https://brew.sh) installed and the game files. The repo d
 ## Requirements
 
 - macOS on Apple Silicon or Intel (tested on macOS Tahoe, M1 Max)
-- Your own copy of Zoo Tycoon 2 Ultimate Collection (not included in this repo; available at [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection/) or from your own disc)
+- Your own copy of Zoo Tycoon 2 Ultimate Collection (not included in this repo; available at [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection-cx5/) or from your own disc)
 - ~2 GB disk space
 
 ## License
