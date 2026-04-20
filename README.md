@@ -2,18 +2,19 @@
 
 Play Zoo Tycoon 2 Ultimate Collection on your Mac, including Apple Silicon Macs (M1, M2, M3, M4).
 
-## Quick start
+## How to play
 
-1. Install [Homebrew](https://brew.sh) if you don't already have it.
-2. Download the game from [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection-cx5/) and extract it. The archive contains a `Game Files` folder — drop that folder into this repo next to `setup.sh`.
-3. In Terminal, from this repo:
+1. **Install Homebrew.** Go to [brew.sh](https://brew.sh), copy the command in the big black box, paste it into the **Terminal** app (search for "Terminal" in Spotlight), and press Enter. Follow the prompts. Skip this step if Homebrew is already installed.
+2. **Download this project.** Click the green **Code** button on this page, choose **Download ZIP**, and extract it. You can rename the folder to something like `Zoo Tycoon 2` and put it anywhere (your Desktop is fine).
+3. **Download the game.** Grab it from [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection-cx5/) and extract it. Inside the extracted download there's a folder called **Game Files**. Drag that whole folder into the project folder from step 2.
+4. **Run it.** Open Terminal, drag the project folder onto the Terminal window (that types out its path for you), then type `cd ` (with a space) _before_ the path and press Enter. Then run these two commands, one at a time:
 
    ```bash
    ./setup.sh
    ./play_zoo_tycoon.sh
    ```
 
-`setup.sh` installs Wine Crossover, mingw-w64, and winetricks, configures Wine, builds the compatibility layer, and deploys everything into `Game Files/`. It is idempotent, so re-running it after updates is safe.
+   The first command sets everything up (it might take a few minutes the first time). The second launches the game. After setup is done once, you only need the second command to play in the future.
 
 ## Known issues
 
@@ -86,13 +87,26 @@ ZT.exe
        -> macOS OpenGL
 ```
 
+### Dock tooltip + menu bar rebrand
+
+By default Wine processes on macOS show `wine-preloader` as the Dock tooltip and `CrossOver FOSS 23.7.1` as the menu bar app label — both are structural, not reachable via `NSBundle` swizzles, `NSRunningApplication.localizedName` overrides, or the private `_LSSetApplicationInformationItem` LaunchServices API. The Dock tooltip is the binary filename basename; the menu bar app label is read from the binary's embedded `__TEXT,__info_plist` section.
+
+`setup.sh` binary-patches Wine Crossover to get both labels right:
+
+1. Replace the hardcoded string `wine-preloader` inside `ntdll.so` with `Zoo Tycoon 2` (same 15-byte length). Wine's child-process `execv` now looks up a binary named `Zoo Tycoon 2` when spawning game processes.
+2. Copy `wine-preloader` to a sibling file literally named `Zoo Tycoon 2`, then binary-patch that copy's embedded `CFBundleName` from `CrossOver FOSS 23.7.1` to `Zoo Tycoon 2`. The original `wine-preloader` stays in place for every other Wine app on the system.
+
+`play_zoo_tycoon.sh` also sets `WINE_APP_NAME=Zoo Tycoon 2` for the game process and `WINE_HIDE_DOCK=1` for the `click_continue.exe` helper. Both are env vars handled by the `cocoa_app.m` patch: the former rebrands the menu's Hide/Quit items and kicks an `_LSSetApplicationInformationItem` call; the latter tells the helper's wine process to stay as an Accessory app so it doesn't add a second Dock icon.
+
+Side effect: a Wine Crossover update clobbers the patched files. Re-run `setup.sh` to restore them.
+
 ### Why this is hard
 
 The game uses the Gamebryo (NetImmerse) engine with a `NiDX9Renderer` class that validates GPU capabilities at startup. It calls GetAdapterIdentifier, GetDeviceCaps, and EnumAdapterModes, then checks results against an internal format table. Anything unexpected and it refuses to start.
 
 The executable is SafeDisc protected (encrypted code sections `stxt774`, `stxt371`). Binary patches must be applied after runtime decryption from inside a loaded DLL.
 
-macOS adds more problems: no 640x480 fullscreen via D3D on Retina (solved by forcing windowed internally and letterboxing at the AppKit layer), deprecated OpenGL with broken framebuffer operations, and Wine's ChangeDisplaySettings failing for non-native resolutions. AppKit-level fullscreen also doesn't update Wine's internal window rect, requiring a separate path that reads the real on-screen window position from the Cocoa side.
+macOS adds more problems: no 640x480 fullscreen via D3D on Retina (solved by forcing windowed internally and letterboxing at the AppKit layer), deprecated OpenGL with broken framebuffer operations, and Wine's ChangeDisplaySettings failing for non-native resolutions. AppKit-level fullscreen also doesn't update Wine's internal window rect, requiring a separate path that reads the real on-screen window position from the Cocoa side. Mouse coordinate scaling has to run at every window size (not just when scaled up) because Wine's `wr` goes stale when the user moves the window, so even the default 640x480 window needs the transform or click zones stick to the pre-move position.
 
 ### Files
 
