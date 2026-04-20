@@ -83,4 +83,43 @@ if [ -z "$REAL_D3D9" ]; then
 fi
 cp "$REAL_D3D9" "Game Files/d3d9_real.dll"
 
+
+# -- Cosmetic rebrand: make the Dock tooltip + menu bar read "Zoo Tycoon 2" --
+say "Rebranding Wine Crossover's ntdll + wine-preloader for Zoo Tycoon 2..."
+WINEDIR="/Applications/Wine Crossover.app/Contents/Resources/wine"
+NTDLL="$WINEDIR/lib/wine/x86_64-unix/ntdll.so"
+WP="$WINEDIR/bin/wine-preloader"
+ZT_WP="$WINEDIR/bin/Zoo Tycoon 2"
+# Back up originals once
+[ ! -f "$NTDLL.bak_crossover" ] && cp "$NTDLL" "$NTDLL.bak_crossover"
+[ ! -f "$WP.bak_crossover" ]    && cp "$WP"    "$WP.bak_crossover"
+# Patch ntdll.so so it looks for "Zoo Tycoon 2" instead of "wine-preloader"
+python3 -c '
+p = "/Applications/Wine Crossover.app/Contents/Resources/wine/lib/wine/x86_64-unix/ntdll.so"
+d = open(p, "rb").read()
+old = b"wine-preloader\x00"
+new = b"Zoo Tycoon 2\x00\x00\x00"
+assert len(old) == len(new)
+if old in d:
+    d = d.replace(old, new)
+    open(p, "wb").write(d)
+    print("ntdll.so patched")
+else:
+    print("ntdll.so already patched")
+'
+# Create/refresh the renamed preloader with the new CFBundleName
+cp "$WP" "$ZT_WP"
+python3 -c '
+p = "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/Zoo Tycoon 2"
+d = open(p, "rb").read()
+old = b"CrossOver FOSS 23.7.1"
+new = b"Zoo Tycoon 2         "
+assert len(old) == len(new)
+d = d.replace(old, new)
+open(p, "wb").write(d)
+print("Zoo Tycoon 2 binary patched (embedded CFBundleName)")
+'
+chmod +x "$ZT_WP"
+
+
 say "Setup complete. Launch the game with:  ./play_zoo_tycoon.sh"

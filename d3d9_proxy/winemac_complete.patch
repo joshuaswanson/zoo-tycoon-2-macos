@@ -1,5 +1,5 @@
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index b433838..74f05a4 100644
+index b433838..f760b95 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
 @@ -19,6 +19,7 @@
@@ -10,10 +10,21 @@ index b433838..74f05a4 100644
  
  #import "cocoa_app.h"
  #import "cocoa_cursorclipping.h"
-@@ -311,6 +312,70 @@ - (void) changeEditMenuKeyEquivalentsForWindow:(NSWindow*)window
+@@ -311,7 +312,84 @@ - (void) changeEditMenuKeyEquivalentsForWindow:(NSWindow*)window
  
      - (void) transformProcessToForeground:(BOOL)activateIfTransformed
      {
+-        if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
++        /* WINE_HIDE_DOCK=1: skip foreground transformation so this wine process
++           doesn't get its own Dock icon. Used for helper exes like click_continue
++           that the main bundle launches in parallel. */
++        {
++            const char* _h = getenv("WINE_HIDE_DOCK");
++            if (_h && *_h && *_h != '0') {
++                [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
++                return;
++            }
++        }
 +        /* WINE_APP_NAME: override the Dock tooltip + menu-bar app label.
 +           macOS caches these in LaunchServices from the binary's bundle at launch
 +           time, so NSBundle swizzling + NSMenu titles aren't enough — we have to
@@ -78,10 +89,14 @@ index b433838..74f05a4 100644
 +                });
 +            }
 +        }
-         if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
++        /* Build the menu bar once, regardless of whether the process was launched
++           from a .app bundle (already Regular) or not. */
++        if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular ||
++            ![NSApp mainMenu])
          {
              NSMenu* mainMenu;
-@@ -340,8 +405,20 @@ - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+             NSMenu* submenu;
+@@ -340,8 +418,20 @@ - (void) transformProcessToForeground:(BOOL)activateIfTransformed
              mainMenu = [[[NSMenu alloc] init] autorelease];
  
              // Application menu
@@ -104,7 +119,7 @@ index b433838..74f05a4 100644
  
              if ([bundleName length])
                  title = [NSString stringWithFormat:WineLocalizedString(STRING_MENU_ITEM_HIDE_APPNAME), bundleName];
-@@ -367,7 +444,7 @@ - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+@@ -367,7 +457,7 @@ - (void) transformProcessToForeground:(BOOL)activateIfTransformed
              item = [submenu addItemWithTitle:title action:@selector(terminate:) keyEquivalent:@"q"];
              [item setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
              item = [[[NSMenuItem alloc] init] autorelease];
@@ -113,7 +128,7 @@ index b433838..74f05a4 100644
              [item setSubmenu:submenu];
              [mainMenu addItem:item];
  
-@@ -1552,6 +1629,38 @@ - (void) handleMouseMove:(NSEvent*)anEvent
+@@ -1552,6 +1642,38 @@ - (void) handleMouseMove:(NSEvent*)anEvent
                      point.y -= rect.origin.y;
                  }
  
@@ -152,7 +167,7 @@ index b433838..74f05a4 100644
                  point = cgpoint_win_from_mac(point);
  
                  event = macdrv_create_event(MOUSE_MOVED_ABSOLUTE, targetWindow);
-@@ -1706,6 +1815,27 @@ - (void) handleMouseButton:(NSEvent*)theEvent
+@@ -1706,6 +1828,27 @@ - (void) handleMouseButton:(NSEvent*)theEvent
                      pt.y -= rect.origin.y;
                  }
  
@@ -180,7 +195,7 @@ index b433838..74f05a4 100644
                  pt = cgpoint_win_from_mac(pt);
  
                  event = macdrv_create_event(MOUSE_BUTTON, window);
-@@ -2758,7 +2888,44 @@ int macdrv_get_cursor_position(CGPoint *pos)
+@@ -2758,7 +2901,44 @@ int macdrv_get_cursor_position(CGPoint *pos)
      OnMainThread(^{
          NSPoint location = [NSEvent mouseLocation];
          location = [[WineApplicationController sharedController] flippedMouseLocation:location];

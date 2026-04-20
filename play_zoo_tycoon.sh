@@ -11,8 +11,9 @@ cd "$(dirname "$0")/Game Files"
 wineserver -k 2>/dev/null
 sleep 1
 
-# Start the auto-click helper (handles EULA, Warning, and Error dialogs)
-WINEDLLOVERRIDES="d3d9=n,b;d3d9_real=b" wine click_continue.exe &
+# Start the auto-click helper (handles EULA, Warning, and Error dialogs).
+# WINE_HIDE_DOCK=1 tells our winemac.drv patch to hide this helper's Dock icon.
+WINE_HIDE_DOCK=1 WINE_APP_NAME= WINEDLLOVERRIDES="d3d9=n,b;d3d9_real=b" wine click_continue.exe &
 
 sleep 2
 
