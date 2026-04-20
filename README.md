@@ -2,19 +2,18 @@
 
 Play Zoo Tycoon 2 Ultimate Collection on your Mac, including Apple Silicon Macs (M1, M2, M3, M4).
 
-## How to play
+## Quick start
 
-1. **Install Homebrew.** Go to [brew.sh](https://brew.sh), copy the command in the big black box, paste it into the **Terminal** app (search for "Terminal" in Spotlight), and press Enter. Follow the prompts. Skip this step if Homebrew is already installed.
-2. **Download this project.** Click the green **Code** button on this page, choose **Download ZIP**, and extract it. You can rename the folder to something like `Zoo Tycoon 2` and put it anywhere (your Desktop is fine).
-3. **Download the game.** Grab it from [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection-cx5/) and extract it. Inside the extracted download there's a folder called **Game Files**. Drag that whole folder into the project folder from step 2.
-4. **Run it.** Open Terminal, drag the project folder onto the Terminal window (that types out its path for you), then type `cd ` (with a space) _before_ the path and press Enter. Then run these two commands, one at a time:
+1. Install [Homebrew](https://brew.sh) if you don't already have it.
+2. Download the game from [oldgamesdownload.com](https://oldgamesdownload.com/zoo-tycoon-2-ultimate-collection-cx5/) and extract it. The archive contains a `Game Files` folder — drop that folder into this repo next to `setup.sh`.
+3. In Terminal, from this repo:
 
    ```bash
    ./setup.sh
    ./play_zoo_tycoon.sh
    ```
 
-   The first command sets everything up (it might take a few minutes the first time). The second launches the game. After setup is done once, you only need the second command to play in the future.
+`setup.sh` installs Wine Crossover, mingw-w64, and winetricks, configures Wine, builds the compatibility layer, and deploys everything into `Game Files/`. It is idempotent, so re-running it after updates is safe.
 
 ## Known issues
 
