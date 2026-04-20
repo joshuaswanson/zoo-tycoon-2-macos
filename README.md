@@ -2,7 +2,7 @@
 
 Play Zoo Tycoon 2 Ultimate Collection on your Mac, including Apple Silicon Macs (M1, M2, M3, M4).
 
-The game runs in a resizable window with 4:3 aspect ratio. Drag the window edges to make it as big or small as you want and the game scales to fit. Click the green fullscreen button to play fullscreen — the game is letterboxed to preserve 4:3.
+The game runs in a resizable window with 4:3 aspect ratio. Drag the window edges to make it as big or small as you want and the game scales to fit. Click the green fullscreen button to play fullscreen. The game is letterboxed to preserve 4:3.
 
 ## Quick start
 
